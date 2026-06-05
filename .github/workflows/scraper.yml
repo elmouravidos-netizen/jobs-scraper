@@ -26,16 +26,15 @@ jobs:
           pip install -r requirements.txt
 
       - name: 🎭 Install Playwright Chromium
-        run: npx playwright install chromium --with-deps
+        run: python -m playwright install chromium --with-deps
 
       - name: 🚀 Run Scraper
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}  # optional — skipped if missing
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python scraper.py
 
       - name: 📊 Report Status
         if: always()
         run: echo "Pipeline finished at $(date -u)"
-
