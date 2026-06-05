@@ -2,9 +2,8 @@ name: MENA Jobs Scraper Pipeline
 
 on:
   schedule:
-    # Runs every 6 hours: 00:00, 06:00, 12:00, 18:00 UTC
     - cron: '0 */6 * * *'
-  workflow_dispatch:  # Manual trigger button in GitHub UI
+  workflow_dispatch:
 
 jobs:
   scrape:
@@ -21,7 +20,7 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: 📦 Install Python Dependencies
+      - name: 📦 Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
@@ -33,9 +32,9 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}  # optional — skipped if missing
         run: python scraper.py
 
       - name: 📊 Report Status
         if: always()
-        run: echo "Scraper pipeline finished at $(date -u)"
+        run: echo "Pipeline finished at $(date -u)"
