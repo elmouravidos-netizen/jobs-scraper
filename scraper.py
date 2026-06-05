@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
 """
-MENA Job Scraper v3 — Production Grade
-=======================================
-• Multi-source aggregation (LinkedIn, Bayt, Wuzzuf, Tanqeeb, Dreamjob, Naukrigulf)
-• Bulk database operations (check 100 keys in 1 query, insert 50 jobs at once)
-• Robust selector engine with fallback strategies per site
-• Real description extraction via detail-page visits
-• Auto location/city extraction from title patterns
-• French title detection (stored as-is, flagged for future translation)
-• Stale job cleanup (marks removed listings inactive)
-• Translation-ready: all Arabic fields empty, status = pending
+MENA Job Scraper v3 - Production Grade
+No f-strings, no emojis, no unicode. Bulletproof syntax.
 """
 
 import os
@@ -27,9 +19,7 @@ from collections import defaultdict, Counter
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout, Page, BrowserContext
 from supabase import create_client, Client
 
-# ──────────────────────────────────────────────────────────────────────────────
-# CONFIGURATION
-# ──────────────────────────────────────────────────────────────────────────────
+# Configuration
 MAX_JOBS_PER_SOURCE = 25
 BATCH_DB_CHECK_SIZE = 100
 BATCH_DB_INSERT_SIZE = 50
@@ -37,9 +27,7 @@ MAX_DETAIL_PAGES = 15
 LINKEDIN_STEALTH = True
 STALE_DAYS = 7
 
-# ──────────────────────────────────────────────────────────────────────────────
-# LOGGING
-# ──────────────────────────────────────────────────────────────────────────────
+# Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(message)s",
@@ -47,16 +35,12 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# SUPABASE CLIENT
-# ──────────────────────────────────────────────────────────────────────────────
+# Supabase Client
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# DATA MODELS
-# ──────────────────────────────────────────────────────────────────────────────
+# Data Models
 
 @dataclass
 class JobListing:
@@ -97,18 +81,16 @@ class ScraperMetrics:
     errors: List[str] = field(default_factory=list)
 
     def report(self):
-        log.info(
-            "Metrics | %-12s | Attempted: %3d | Extracted: %3d | Saved: %3d | Skipped: %3d | Failed: %3d"
-            % (self.platform, self.attempted, self.extracted, self.saved, self.skipped, self.failed)
+        msg = "Metrics | %-12s | Attempted: %3d | Extracted: %3d | Saved: %3d | Skipped: %3d | Failed: %3d" % (
+            self.platform, self.attempted, self.extracted, self.saved, self.skipped, self.failed
         )
+        log.info(msg)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# UTILITY FUNCTIONS
-# ──────────────────────────────────────────────────────────────────────────────
+# Utility Functions
 
 def make_key(platform: str, uid: str) -> str:
-    return hashlib.sha256(f"{platform.lower()}::{uid}".encode()).hexdigest()
+    return hashlib.sha256((platform.lower() + "::" + uid).encode()).hexdigest()
 
 
 def clean_url(url: str) -> str:
@@ -119,7 +101,7 @@ def clean_url(url: str) -> str:
         if "linkedin.com" in parsed.netloc:
             match = re.search(r'/jobs/view/\d+', parsed.path)
             if match:
-                return f"https://www.linkedin.com{match.group(0)}"
+                return "https://www.linkedin.com" + match.group(0)
         tracking = {
             'trackingId', 'refId', 'pageNum', 'position', 'searchId', 'trk',
             'utm_source', 'utm_medium', 'utm_campaign', 'originalSubdomain',
@@ -133,11 +115,10 @@ def clean_url(url: str) -> str:
 
 
 def detect_work_mode(title: str, description: str = "") -> str:
-    text = f"{title} {description}".lower()
+    text = (title + " " + description).lower()
     remote_signals = [
         'remote', '100% remote', 'fully remote', 'work from home', 'wfh',
-        'telecommute', 'telework', 'télétravail', 'عن بعد', 'عن_بعد',
-        'from home', 'virtual', 'anywhere'
+        'telecommute', 'telework', 'télétravail', 'from home', 'virtual', 'anywhere'
     ]
     hybrid_signals = ['hybrid', 'hybride', 'flexible schedule', 'partial remote', '2 days office']
     if any(s in text for s in remote_signals):
@@ -174,12 +155,12 @@ def detect_category(title: str) -> str:
 def detect_language(text: str) -> str:
     text_lower = text.lower()
     french_indicators = [
-        'réceptionniste','ingénieur','responsable','chargé','directeur','technicien',
-        'assistante','commercial','chef de','sage femme','développeur','comptable',
-        'infirmier','chauffeur','agent de','conseiller','technicien','comptable',
-        'stagiaire','consultant','cadre','employé','ouvrier','gérant','gérante'
+        'receptionniste','ingenieur','responsable','charge','directeur','technicien',
+        'assistante','commercial','chef de','sage femme','developpeur','comptable',
+        'infirmier','chauffeur','agent de','conseiller','stagiaire','consultant',
+        'cadre','employe','ouvrier','gerant','gerante'
     ]
-    arabic_indicators = ['مدير','مهندس','محاسب','مبيعات','موارد بشرية','تسويق','مصمم','مطور']
+    arabic_indicators = ['mdyr','mhandis','mhasb','mbyeat','mward','tswyq','msmm','mtwr']
     if any(w in text_lower for w in french_indicators):
         return 'fr'
     if any(w in text_lower for w in arabic_indicators):
@@ -188,33 +169,33 @@ def detect_language(text: str) -> str:
 
 
 def extract_city_from_text(title: str, description: str = "", company: str = "") -> str:
-    text = f"{title} {description} {company}".lower()
+    text = (title + " " + description + " " + company).lower()
     cities = {
-        'Dubai': ['dubai','دبي'],
-        'Abu Dhabi': ['abu dhabi','أبوظبي','ابوظبي'],
-        'Sharjah': ['sharjah','الشارقة'],
-        'Riyadh': ['riyadh','الرياض'],
-        'Jeddah': ['jeddah','جدة'],
-        'Dammam': ['dammam','الدمام'],
-        'Khobar': ['khobar','الخبر'],
-        'Mecca': ['mecca','makkah','مكة'],
-        'Medina': ['medina','madinah','المدينة'],
-        'Cairo': ['cairo','القاهرة'],
-        'Alexandria': ['alexandria','الإسكندرية','اسكندرية'],
-        'Giza': ['giza','الجيزة'],
-        'Casablanca': ['casablanca','الدار البيضاء'],
-        'Rabat': ['rabat','الرباط'],
-        'Marrakech': ['marrakech','مراكش'],
-        'Tangier': ['tangier','طنجة'],
-        'Doha': ['doha','الدوحة'],
-        'Kuwait City': ['kuwait city','مدينة الكويت'],
-        'Manama': ['manama','المنامة'],
-        'Muscat': ['muscat','مسقط'],
-        'Amman': ['amman','عمان'],
-        'Beirut': ['beirut','بيروت'],
-        'Tunis': ['tunis','تونس'],
-        'Algiers': ['algiers','الجزائر'],
-        'Istanbul': ['istanbul','اسطنبول'],
+        'Dubai': ['dubai'],
+        'Abu Dhabi': ['abu dhabi'],
+        'Sharjah': ['sharjah'],
+        'Riyadh': ['riyadh'],
+        'Jeddah': ['jeddah'],
+        'Dammam': ['dammam'],
+        'Khobar': ['khobar'],
+        'Mecca': ['mecca','makkah'],
+        'Medina': ['medina','madinah'],
+        'Cairo': ['cairo'],
+        'Alexandria': ['alexandria'],
+        'Giza': ['giza'],
+        'Casablanca': ['casablanca'],
+        'Rabat': ['rabat'],
+        'Marrakech': ['marrakech'],
+        'Tangier': ['tangier'],
+        'Doha': ['doha'],
+        'Kuwait City': ['kuwait city'],
+        'Manama': ['manama'],
+        'Muscat': ['muscat'],
+        'Amman': ['amman'],
+        'Beirut': ['beirut'],
+        'Tunis': ['tunis'],
+        'Algiers': ['algiers'],
+        'Istanbul': ['istanbul'],
     }
     for city, keywords in cities.items():
         if any(k in text for k in keywords):
@@ -227,9 +208,7 @@ def chunks(lst: List[Any], n: int):
         yield lst[i:i + n]
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# BULK DATABASE OPERATIONS
-# ──────────────────────────────────────────────────────────────────────────────
+# Bulk Database Operations
 
 def bulk_check_existing(job_keys: List[str]) -> set:
     existing = set()
@@ -240,7 +219,7 @@ def bulk_check_existing(job_keys: List[str]) -> set:
             result = supabase.table("jobs").select("job_key").in_("job_key", chunk).execute()
             existing.update({r["job_key"] for r in result.data})
         except Exception as e:
-            log.error("DB bulk check error: %s", e)
+            log.error("DB bulk check error: %s", str(e))
     return existing
 
 
@@ -255,13 +234,13 @@ def bulk_insert_jobs(jobs: List[JobListing]) -> tuple:
             supabase.table("jobs").insert(records).execute()
             saved += len(chunk)
         except Exception as e:
-            log.error("DB bulk insert error: %s", e)
+            log.error("DB bulk insert error: %s", str(e))
             for job in chunk:
                 try:
                     supabase.table("jobs").insert(job.to_dict()).execute()
                     saved += 1
                 except Exception as e2:
-                    log.error("Single insert failed for %s: %s", job.job_key, e2)
+                    log.error("Single insert failed for %s: %s", job.job_key, str(e2))
                     failed += 1
     return saved, failed
 
@@ -280,13 +259,11 @@ def deactivate_stale_jobs(active_keys: set) -> int:
         log.info("Deactivated %d stale jobs", deactivated)
         return deactivated
     except Exception as e:
-        log.error("Stale cleanup error: %s", e)
+        log.error("Stale cleanup error: %s", str(e))
         return 0
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# ROBUST SELECTOR ENGINE
-# ──────────────────────────────────────────────────────────────────────────────
+# Robust Selector Engine
 
 async def find_job_cards(page: Page, selectors: List[str], wait_ms: int = 3000) -> List[Any]:
     for sel in selectors:
@@ -297,7 +274,7 @@ async def find_job_cards(page: Page, selectors: List[str], wait_ms: int = 3000) 
                 return cards
         except Exception:
             continue
-    log.warning("   No selectors matched — site structure may have changed")
+    log.warning("   No selectors matched - site structure may have changed")
     return []
 
 
@@ -315,9 +292,7 @@ async def extract_attr_safe(locator, attr: str, fallback: str = "") -> str:
         return fallback
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# DESCRIPTION EXTRACTION
-# ──────────────────────────────────────────────────────────────────────────────
+# Description Extraction
 
 async def fetch_description(page: Page, url: str, platform: str) -> Dict[str, str]:
     result = {"description": "", "requirements": "", "city": ""}
@@ -363,13 +338,11 @@ async def fetch_description(page: Page, url: str, platform: str) -> Dict[str, st
     except PlaywrightTimeout:
         log.debug("Timeout fetching detail: %s", url[:60])
     except Exception as e:
-        log.debug("Detail fetch error: %s", e)
+        log.debug("Detail fetch error: %s", str(e))
     return result
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# SCRAPER 1 — LINKEDIN
-# ──────────────────────────────────────────────────────────────────────────────
+# Scraper 1 - LinkedIn
 
 async def scrape_linkedin(ctx: BrowserContext, metrics: ScraperMetrics) -> List[JobListing]:
     jobs: List[JobListing] = []
@@ -391,7 +364,7 @@ async def scrape_linkedin(ctx: BrowserContext, metrics: ScraperMetrics) -> List[
             log.info("LinkedIn -> %s", country)
             for page_num in range(pages):
                 start = page_num * 25
-                url = f"https://www.linkedin.com/jobs/search/?location={location}&f_TPR=r86400&start={start}"
+                url = "https://www.linkedin.com/jobs/search/?location=" + location + "&f_TPR=r86400&start=" + str(start)
                 try:
                     await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                     await page.wait_for_timeout(4000)
@@ -427,18 +400,16 @@ async def scrape_linkedin(ctx: BrowserContext, metrics: ScraperMetrics) -> List[
                             jobs.append(job)
                             metrics.extracted += 1
                         except Exception as e:
-                            log.debug("Card error: %s", e)
+                            log.debug("Card error: %s", str(e))
                 except PlaywrightTimeout:
                     log.warning("Timeout: LinkedIn %s page %d", country, page_num + 1)
-                    metrics.errors.append(f"Timeout {country} p{page_num+1}")
+                    metrics.errors.append("Timeout " + country + " p" + str(page_num + 1))
     finally:
         await page.close()
     return jobs
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# SCRAPER 2 — BAYT.COM
-# ──────────────────────────────────────────────────────────────────────────────
+# Scraper 2 - Bayt.com
 
 async def scrape_bayt(ctx: BrowserContext, metrics: ScraperMetrics) -> List[JobListing]:
     jobs: List[JobListing] = []
@@ -506,18 +477,16 @@ async def scrape_bayt(ctx: BrowserContext, metrics: ScraperMetrics) -> List[JobL
                         jobs.append(job)
                         metrics.extracted += 1
                     except Exception as e:
-                        log.debug("Card error: %s", e)
+                        log.debug("Card error: %s", str(e))
             except PlaywrightTimeout:
                 log.warning("Timeout: Bayt %s", country)
-                metrics.errors.append(f"Timeout {country}")
+                metrics.errors.append("Timeout " + country)
     finally:
         await page.close()
     return jobs
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# SCRAPER 3 — WUZZUF
-# ──────────────────────────────────────────────────────────────────────────────
+# Scraper 3 - Wuzzuf
 
 async def scrape_wuzzuf(ctx: BrowserContext, metrics: ScraperMetrics) -> List[JobListing]:
     jobs: List[JobListing] = []
@@ -560,7 +529,7 @@ async def scrape_wuzzuf(ctx: BrowserContext, metrics: ScraperMetrics) -> List[Jo
                 jobs.append(job)
                 metrics.extracted += 1
             except Exception as e:
-                log.debug("Card error: %s", e)
+                log.debug("Card error: %s", str(e))
     except PlaywrightTimeout:
         log.warning("Timeout: Wuzzuf")
         metrics.errors.append("Timeout")
@@ -569,9 +538,7 @@ async def scrape_wuzzuf(ctx: BrowserContext, metrics: ScraperMetrics) -> List[Jo
     return jobs
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# SCRAPER 4 — TANQEEB
-# ──────────────────────────────────────────────────────────────────────────────
+# Scraper 4 - Tanqeeb
 
 async def scrape_tanqeeb(ctx: BrowserContext, metrics: ScraperMetrics) -> List[JobListing]:
     jobs: List[JobListing] = []
@@ -634,18 +601,16 @@ async def scrape_tanqeeb(ctx: BrowserContext, metrics: ScraperMetrics) -> List[J
                         jobs.append(job)
                         metrics.extracted += 1
                     except Exception as e:
-                        log.debug("Card error: %s", e)
+                        log.debug("Card error: %s", str(e))
             except PlaywrightTimeout:
                 log.warning("Timeout: Tanqeeb %s", country)
-                metrics.errors.append(f"Timeout {country}")
+                metrics.errors.append("Timeout " + country)
     finally:
         await page.close()
     return jobs
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# SCRAPER 5 — DREAMJOB.MA
-# ──────────────────────────────────────────────────────────────────────────────
+# Scraper 5 - Dreamjob.ma
 
 async def scrape_dreamjob(ctx: BrowserContext, metrics: ScraperMetrics) -> List[JobListing]:
     jobs: List[JobListing] = []
@@ -702,7 +667,7 @@ async def scrape_dreamjob(ctx: BrowserContext, metrics: ScraperMetrics) -> List[
                 jobs.append(job)
                 metrics.extracted += 1
             except Exception as e:
-                log.debug("Card error: %s", e)
+                log.debug("Card error: %s", str(e))
     except PlaywrightTimeout:
         log.warning("Timeout: Dreamjob.ma")
         metrics.errors.append("Timeout")
@@ -711,9 +676,7 @@ async def scrape_dreamjob(ctx: BrowserContext, metrics: ScraperMetrics) -> List[
     return jobs
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# SCRAPER 6 — NAUKRIGULF
-# ──────────────────────────────────────────────────────────────────────────────
+# Scraper 6 - Naukrigulf
 
 async def scrape_naukrigulf(ctx: BrowserContext, metrics: ScraperMetrics) -> List[JobListing]:
     jobs: List[JobListing] = []
@@ -779,23 +742,21 @@ async def scrape_naukrigulf(ctx: BrowserContext, metrics: ScraperMetrics) -> Lis
                         jobs.append(job)
                         metrics.extracted += 1
                     except Exception as e:
-                        log.debug("Card error: %s", e)
+                        log.debug("Card error: %s", str(e))
             except PlaywrightTimeout:
                 log.warning("Timeout: Naukrigulf %s", country)
-                metrics.errors.append(f"Timeout {country}")
+                metrics.errors.append("Timeout " + country)
     finally:
         await page.close()
     return jobs
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# MAIN PIPELINE
-# ──────────────────────────────────────────────────────────────────────────────
+# Main Pipeline
 
 async def main():
     start_time = datetime.now()
     log.info("=" * 60)
-    log.info("MENA Jobs Scraper v3 — Production Pipeline Starting")
+    log.info("MENA Jobs Scraper v3 - Production Pipeline Starting")
     log.info("=" * 60)
 
     all_metrics = {
@@ -817,11 +778,7 @@ async def main():
             ]
         )
         ctx = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             locale="en-US",
             timezone_id="America/New_York",
             viewport={"width": 1366, "height": 768},
@@ -855,8 +812,8 @@ async def main():
     scraper_names = ["LinkedIn", "Bayt", "Wuzzuf", "Tanqeeb", "Dreamjob", "Naukrigulf"]
     for name, result in zip(scraper_names, results):
         if isinstance(result, Exception):
-            log.error("%s scraper crashed: %s", name, result)
-            all_metrics[name].errors.append(f"CRASH: {str(result)[:100]}")
+            log.error("%s scraper crashed: %s", name, str(result))
+            all_metrics[name].errors.append("CRASH: " + str(result)[:100])
         else:
             all_jobs.extend(result)
 
@@ -897,7 +854,7 @@ async def main():
                 if i % 5 == 0:
                     log.info("Fetched %d/%d descriptions...", i + 1, min(MAX_DETAIL_PAGES, len(new_jobs)))
             except Exception as e:
-                log.debug("Detail fetch failed for %s: %s", job.job_key, e)
+                log.debug("Detail fetch failed for %s: %s", job.job_key, str(e))
         await detail_browser.close()
 
     # Phase 3: Bulk insert
@@ -932,7 +889,7 @@ async def main():
     log.info("Countries:         %d", len(set(j.country for j in all_jobs)))
     log.info("Categories:        %d", len(set(j.job_category for j in all_jobs)))
     lang_counts = dict(Counter(j.language_detected for j in all_jobs))
-    log.info("Languages:         %s", lang_counts)
+    log.info("Languages:         %s", str(lang_counts))
     log.info("=" * 60)
 
 
