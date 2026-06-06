@@ -1,4 +1,3 @@
-cat > /mnt/user-data/outputs/scraper.py << 'PYEOF'
 import os
 import re
 import asyncio
@@ -44,18 +43,16 @@ def make_key(platform: str, uid: str) -> str:
 
 
 def clean_url(url: str) -> str:
-    """Strip tracking params from URLs, keep only the clean path."""
+    """Strip tracking params, keep only clean path."""
     if not url:
         return url
     try:
         parsed = urlparse(url)
-        # For LinkedIn: keep only the /jobs/view/XXXXX part, drop all params
         if "linkedin.com" in parsed.netloc:
             match = re.search(r'/jobs/view/[^/?]+', parsed.path)
             if match:
                 return f"https://www.linkedin.com{match.group(0)}"
-        # For other sites: drop known tracking params
-        tracking = {'trackingId','refId','pageNum','position','searchId','trk'}
+        tracking = {'trackingId', 'refId', 'pageNum', 'position', 'searchId', 'trk'}
         qs = {k: v for k, v in parse_qs(parsed.query).items() if k not in tracking}
         clean = parsed._replace(query=urlencode(qs, doseq=True))
         return urlunparse(clean)
@@ -64,7 +61,6 @@ def clean_url(url: str) -> str:
 
 
 def detect_work_mode(title: str, description: str = "") -> str:
-    """Auto-detect Remote / Hybrid / Onsite from title and description."""
     text = (title + " " + description).lower()
     if any(w in text for w in ['remote', '100% remote', 'fully remote', 'work from home', 'wfh', 'télétravail']):
         return 'Remote'
@@ -74,37 +70,25 @@ def detect_work_mode(title: str, description: str = "") -> str:
 
 
 def detect_category(title: str) -> str:
-    """Auto-detect job category from title keywords."""
     title_lower = title.lower()
     categories = {
-        'Technology':   ['developer','engineer','software','data','devops','cloud','cyber','it ','tech','programmer','fullstack','frontend','backend','mobile','ai ','ml ','architect'],
-        'Sales':        ['sales','account manager','business development','bd ','revenue','commercial'],
-        'Marketing':    ['marketing','seo','content','social media','brand','digital','influencer','media buyer'],
-        'Finance':      ['finance','accounting','accountant','auditor','tax','treasury','financial','actuarial','cfo'],
-        'HR':           ['hr ','human resources','talent','recruiter','recruitment','payroll','people ops'],
-        'Operations':   ['operations','logistics','supply chain','procurement','purchasing','warehouse','inventory','facilities'],
-        'Healthcare':   ['doctor','nurse','pharmacist','medical','health','clinical','dentist','sage femme','midwife'],
-        'Education':    ['teacher','instructor','professor','tutor','trainer','educational','learning designer'],
-        'Design':       ['designer','ux','ui ','graphic','creative','visual','illustrator','photoshop'],
-        'Customer Service': ['customer','support','service','helpdesk','call center','client'],
-        'Management':   ['manager','director','head of','chief','ceo','cto','vp ','vice president','lead'],
-        'Engineering':  ['mechanical','electrical','civil','chemical','industrial','construction','maintenance'],
+        'Technology':       ['developer', 'engineer', 'software', 'data', 'devops', 'cloud', 'cyber', 'it ', 'tech', 'programmer', 'fullstack', 'frontend', 'backend', 'mobile', 'ai ', 'ml ', 'architect'],
+        'Sales':            ['sales', 'account manager', 'business development', 'bd ', 'revenue', 'commercial'],
+        'Marketing':        ['marketing', 'seo', 'content', 'social media', 'brand', 'digital', 'media buyer'],
+        'Finance':          ['finance', 'accounting', 'accountant', 'auditor', 'tax', 'treasury', 'financial', 'cfo'],
+        'HR':               ['hr ', 'human resources', 'talent', 'recruiter', 'recruitment', 'payroll'],
+        'Operations':       ['operations', 'logistics', 'supply chain', 'procurement', 'warehouse', 'inventory'],
+        'Healthcare':       ['doctor', 'nurse', 'pharmacist', 'medical', 'health', 'clinical', 'dentist', 'sage femme'],
+        'Education':        ['teacher', 'instructor', 'professor', 'tutor', 'trainer', 'educational'],
+        'Design':           ['designer', 'ux', 'ui ', 'graphic', 'creative', 'visual'],
+        'Customer Service': ['customer', 'support', 'helpdesk', 'call center', 'client'],
+        'Management':       ['manager', 'director', 'head of', 'chief', 'ceo', 'cto', 'vp ', 'vice president'],
+        'Engineering':      ['mechanical', 'electrical', 'civil', 'chemical', 'industrial', 'construction', 'maintenance'],
     }
     for category, keywords in categories.items():
         if any(kw in title_lower for kw in keywords):
             return category
     return 'Other'
-
-
-def detect_language(text: str) -> str:
-    """Detect if title is French (Morocco/Lebanon) vs English."""
-    french_indicators = ['réceptionniste','ingénieur','responsable','chargé','directeur',
-                        'technicien','assistante','commercial','chef de','sage femme',
-                        'développeur','comptable','infirmier','chauffeur','agent de']
-    text_lower = text.lower()
-    if any(w in text_lower for w in french_indicators):
-        return 'fr'
-    return 'en'
 
 
 def already_exists(key: str) -> bool:
@@ -132,18 +116,17 @@ async def translate(text: str) -> str:
 
 
 async def save_job(job: dict) -> bool:
-    """Returns True if saved, False if skipped."""
     if already_exists(job["job_key"]):
         log.info(f"  ⏭  Skip: {job['title_en'][:55]}")
         return False
 
     if TRANSLATE_ENABLED:
-        job["title_ar"]       = await translate(job["title_en"])
+        job["title_ar"] = await translate(job["title_en"])
         job["description_ar"] = await translate(job.get("description_en", ""))
         job["translation_status"] = "completed" if job["title_ar"] else "failed"
     else:
-        job["title_ar"]           = ""
-        job["description_ar"]     = ""
+        job["title_ar"] = ""
+        job["description_ar"] = ""
         job["translation_status"] = "pending"
 
     try:
@@ -151,35 +134,34 @@ async def save_job(job: dict) -> bool:
         log.info(f"  ✅ [{job['source_platform']:12}] [{job['country']}] [{job['job_category']:15}] [{job['work_mode']:7}] {job['title_en'][:45]}")
         return True
     except Exception as err:
-        log.error(f"  ❌ DB error: {err} | job: {job['title_en'][:40]}")
+        log.error(f"  ❌ DB error: {err}")
         return False
 
 
 def build_job(platform, uid, title, company, country, url, description="") -> dict:
-    """Build a standardized job dict with all enriched fields."""
     clean = clean_url(url)
     return {
-        "job_key":         make_key(platform.lower(), uid),
-        "title_en":        title.strip(),
-        "company_name":    company.strip() if company else "Unknown",
-        "description_en":  description or f"Full details at {clean}",
-        "title_ar":        "",
-        "description_ar":  "",
+        "job_key":            make_key(platform.lower(), uid),
+        "title_en":           title.strip(),
+        "company_name":       company.strip() if company else "Unknown",
+        "description_en":     description or f"Full details at {clean}",
+        "title_ar":           "",
+        "description_ar":     "",
         "translation_status": "pending",
-        "country":         country,
-        "location_city":   "",
-        "work_mode":       detect_work_mode(title, description),
-        "job_category":    detect_category(title),
-        "salary_range":    "",
-        "source_url":      clean,
-        "source_platform": platform,
-        "is_active":       True,
-        "posted_at":       datetime.now(timezone.utc).isoformat(),
+        "country":            country,
+        "location_city":      "",
+        "work_mode":          detect_work_mode(title, description),
+        "job_category":       detect_category(title),
+        "salary_range":       "",
+        "source_url":         clean,
+        "source_platform":    platform,
+        "is_active":          True,
+        "posted_at":          datetime.now(timezone.utc).isoformat(),
     }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SCRAPER 1 — LinkedIn (working, keep + improve)
+#  SCRAPER 1 — LinkedIn (working + paginated for more results)
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def scrape_linkedin(ctx) -> list[dict]:
@@ -213,7 +195,8 @@ async def scrape_linkedin(ctx) -> list[dict]:
                         href    = await card.locator("a.base-card__full-link").get_attribute("href") or ""
                         uid     = re.search(r'/jobs/view/(\d+)', href)
                         uid     = uid.group(1) if uid else href[-20:]
-                        if not title: continue
+                        if not title:
+                            continue
                         jobs.append(build_job("LinkedIn", uid, title, company, country, href))
                     except Exception as e:
                         log.debug(f"   card err: {e}")
@@ -225,7 +208,7 @@ async def scrape_linkedin(ctx) -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SCRAPER 2 — Bayt.com (fixed selectors based on real DOM)
+#  SCRAPER 2 — Bayt.com
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def scrape_bayt(ctx) -> list[dict]:
@@ -243,14 +226,9 @@ async def scrape_bayt(ctx) -> list[dict]:
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                 await page.wait_for_timeout(4000)
-
-                # Bayt uses <li> tags with data-job-id attribute
                 cards = await page.locator("li[data-job-id]").all()
-
-                # Fallback: try generic job list items
                 if not cards:
                     cards = await page.locator("ul.list li").all()
-
                 log.info(f"   {len(cards)} cards found")
                 for card in cards[:MAX_JOBS_PER_SOURCE]:
                     try:
@@ -259,12 +237,13 @@ async def scrape_bayt(ctx) -> list[dict]:
                         company  = ""
                         try:
                             company = (await card.locator("[class*='company'], [class*='employer']").first.inner_text()).strip()
-                        except:
+                        except Exception:
                             pass
-                        href = await title_el.get_attribute("href") or ""
+                        href     = await title_el.get_attribute("href") or ""
                         full_url = href if href.startswith("http") else f"https://www.bayt.com{href}"
-                        uid  = href.split("/")[-2] or title[:40]
-                        if not title: continue
+                        uid      = href.split("/")[-2] or title[:40]
+                        if not title:
+                            continue
                         jobs.append(build_job("Bayt", uid, title, company, country, full_url))
                     except Exception as e:
                         log.debug(f"   card err: {e}")
@@ -276,7 +255,7 @@ async def scrape_bayt(ctx) -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SCRAPER 3 — Wuzzuf (Egypt, fixed selectors)
+#  SCRAPER 3 — Wuzzuf (Egypt)
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def scrape_wuzzuf(ctx) -> list[dict]:
@@ -286,13 +265,9 @@ async def scrape_wuzzuf(ctx) -> list[dict]:
         log.info(f"🌐 Wuzzuf → EG")
         await page.goto(url, wait_until="domcontentloaded", timeout=45000)
         await page.wait_for_timeout(4000)
-
-        # Wuzzuf wraps each job in a <div> with class css-1gatmva
-        # Fallback: any article or section containing a job title link
         cards = await page.locator("div.css-1gatmva").all()
         if not cards:
             cards = await page.locator("article, [class*='JobCard'], [class*='job-card']").all()
-
         log.info(f"   {len(cards)} cards found")
         for card in cards[:MAX_JOBS_PER_SOURCE]:
             try:
@@ -301,12 +276,13 @@ async def scrape_wuzzuf(ctx) -> list[dict]:
                 company  = ""
                 try:
                     company = (await card.locator("a[class*='company'], [class*='company']").first.inner_text()).strip()
-                except:
+                except Exception:
                     pass
                 href     = await title_el.get_attribute("href") or ""
                 full_url = f"https://wuzzuf.net{href}" if not href.startswith("http") else href
                 uid      = re.sub(r'\?.*', '', href).split("/")[-1] or title[:40]
-                if not title: continue
+                if not title:
+                    continue
                 jobs.append(build_job("Wuzzuf", uid, title, company, "EG", full_url))
             except Exception as e:
                 log.debug(f"   card err: {e}")
@@ -318,7 +294,7 @@ async def scrape_wuzzuf(ctx) -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SCRAPER 4 — Tanqeeb (fixed — uses JS rendering, needs extra wait)
+#  SCRAPER 4 — Tanqeeb
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def scrape_tanqeeb(ctx) -> list[dict]:
@@ -335,8 +311,6 @@ async def scrape_tanqeeb(ctx) -> list[dict]:
             try:
                 await page.goto(url, wait_until="networkidle", timeout=50000)
                 await page.wait_for_timeout(5000)
-
-                # Try multiple possible selectors for Tanqeeb
                 selectors = [
                     "div.job-card",
                     "div[class*='job-card']",
@@ -350,9 +324,8 @@ async def scrape_tanqeeb(ctx) -> list[dict]:
                 for sel in selectors:
                     cards = await page.locator(sel).all()
                     if cards:
-                        log.info(f"   Matched selector: {sel}")
+                        log.info(f"   Matched: {sel}")
                         break
-
                 log.info(f"   {len(cards)} cards found")
                 for card in cards[:MAX_JOBS_PER_SOURCE]:
                     try:
@@ -361,16 +334,17 @@ async def scrape_tanqeeb(ctx) -> list[dict]:
                         company  = ""
                         try:
                             company = (await card.locator("[class*='company'], [class*='employer']").first.inner_text()).strip()
-                        except:
+                        except Exception:
                             pass
                         href = ""
                         try:
                             href = await card.locator("a").first.get_attribute("href") or ""
-                        except:
+                        except Exception:
                             pass
                         full_url = href if href.startswith("http") else f"https://www.tanqeeb.com{href}"
                         uid      = re.sub(r'\?.*', '', href).split("/")[-1] or title[:40]
-                        if not title: continue
+                        if not title:
+                            continue
                         jobs.append(build_job("Tanqeeb", uid, title, company, country, full_url))
                     except Exception as e:
                         log.debug(f"   card err: {e}")
@@ -382,7 +356,7 @@ async def scrape_tanqeeb(ctx) -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SCRAPER 5 — Dreamjob.ma (Morocco, fixed)
+#  SCRAPER 5 — Dreamjob.ma (Morocco)
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def scrape_dreamjob(ctx) -> list[dict]:
@@ -392,8 +366,6 @@ async def scrape_dreamjob(ctx) -> list[dict]:
         log.info(f"🌐 Dreamjob.ma → MA")
         await page.goto(url, wait_until="networkidle", timeout=50000)
         await page.wait_for_timeout(4000)
-
-        # Dreamjob is WordPress/WP Job Manager based
         selectors = [
             "li.job_listing",
             "div.job_listing",
@@ -406,9 +378,8 @@ async def scrape_dreamjob(ctx) -> list[dict]:
         for sel in selectors:
             cards = await page.locator(sel).all()
             if cards:
-                log.info(f"   Matched selector: {sel}")
+                log.info(f"   Matched: {sel}")
                 break
-
         log.info(f"   {len(cards)} cards found")
         for card in cards[:MAX_JOBS_PER_SOURCE]:
             try:
@@ -417,12 +388,13 @@ async def scrape_dreamjob(ctx) -> list[dict]:
                 company  = ""
                 try:
                     company = (await card.locator(".company, strong, [class*='company']").first.inner_text()).strip()
-                except:
+                except Exception:
                     pass
-                href = await title_el.get_attribute("href") or ""
+                href     = await title_el.get_attribute("href") or ""
                 full_url = href if href.startswith("http") else f"https://www.dreamjob.ma{href}"
-                uid = re.sub(r'\?.*', '', href).split("/")[-2] or title[:40]
-                if not title: continue
+                uid      = re.sub(r'\?.*', '', href).split("/")[-2] or title[:40]
+                if not title:
+                    continue
                 jobs.append(build_job("Dreamjob.ma", uid, title, company, "MA", full_url))
             except Exception as e:
                 log.debug(f"   card err: {e}")
@@ -434,7 +406,7 @@ async def scrape_dreamjob(ctx) -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SCRAPER 6 — Naukrigulf (bonus — Gulf focused, scraper friendly)
+#  SCRAPER 6 — Naukrigulf (bonus Gulf source)
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def scrape_naukrigulf(ctx) -> list[dict]:
@@ -450,11 +422,9 @@ async def scrape_naukrigulf(ctx) -> list[dict]:
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                 await page.wait_for_timeout(4000)
-
-                cards = await page.locator("div.ni-job-tuple, article.ng-job-tuple, [class*='jobTuple'], [class*='job-tuple']").all()
+                cards = await page.locator("div.ni-job-tuple, [class*='jobTuple'], [class*='job-tuple']").all()
                 if not cards:
                     cards = await page.locator("div[class*='JobCard'], section[class*='job']").all()
-
                 log.info(f"   {len(cards)} cards found")
                 for card in cards[:MAX_JOBS_PER_SOURCE]:
                     try:
@@ -463,12 +433,13 @@ async def scrape_naukrigulf(ctx) -> list[dict]:
                         company  = ""
                         try:
                             company = (await card.locator("[class*='comp-name'], [class*='company']").first.inner_text()).strip()
-                        except:
+                        except Exception:
                             pass
-                        href = await title_el.get_attribute("href") or ""
+                        href     = await title_el.get_attribute("href") or ""
                         full_url = href if href.startswith("http") else f"https://www.naukrigulf.com{href}"
-                        uid = re.sub(r'\?.*', '', href).split("-")[-1] or title[:40]
-                        if not title: continue
+                        uid      = re.sub(r'\?.*', '', href).split("-")[-1] or title[:40]
+                        if not title:
+                            continue
                         jobs.append(build_job("Naukrigulf", uid, title, company, country, full_url))
                     except Exception as e:
                         log.debug(f"   card err: {e}")
@@ -514,19 +485,17 @@ async def main():
         )
         await browser.close()
 
-    # Flatten + report per-scraper counts
     all_jobs: list[dict] = []
     scraper_names = ["LinkedIn", "Bayt", "Wuzzuf", "Tanqeeb", "Dreamjob", "Naukrigulf"]
     for name, r in zip(scraper_names, results):
         if isinstance(r, Exception):
-            log.error(f"❌ {name} scraper crashed: {r}")
+            log.error(f"❌ {name} crashed: {r}")
         else:
             log.info(f"📦 {name}: {len(r)} jobs collected")
             all_jobs.extend(r)
 
     log.info(f"\n📦 TOTAL collected: {len(all_jobs)}")
 
-    # Save all jobs
     saved = skipped = failed = 0
     for job in all_jobs:
         try:
@@ -547,7 +516,6 @@ async def main():
     log.info(f"   ❌ Failed:  {failed}")
     log.info(f"{'='*55}")
 
+
 if __name__ == "__main__":
     asyncio.run(main())
-PYEOF
-echo "Done"
