@@ -35,9 +35,9 @@ OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 supabase: Client   = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-TRANSLATE_MODEL    = "qwen/qwen2.5-72b-instruct"
-BATCH_SIZE         = 15      # titles per API call
-PAUSE_BETWEEN      = 1.5     # seconds between batches (rate limit safety)
+TRANSLATE_MODEL    = "qwen/qwen-2.5-72b-instruct"
+BATCH_SIZE         = 10      # titles per API call
+PAUSE_BETWEEN      = 2.0     # seconds between batches (rate limit safety)
 FETCH_PAGE_SIZE    = 200     # jobs fetched from DB per round
 
 
