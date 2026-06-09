@@ -32,7 +32,7 @@ JOOBLE_ENABLED      = bool(JOOBLE_API_KEY)
 
 # Best model for Arabic: native Arabic training, cheap, fast
 # $0.30/M input + $1.80/M output — perfect for short job titles
-TRANSLATE_MODEL     = "qwen/qwen2.5-32b-instruct"
+TRANSLATE_MODEL     = "qwen/qwen2.5-72b-instruct"
 TRANSLATE_BATCH     = 15   # titles per API call — reduces cost by 15x
 TRANSLATE_MAX_RETRY = 3
 
