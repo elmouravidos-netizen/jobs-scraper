@@ -32,7 +32,7 @@ JOOBLE_ENABLED      = bool(JOOBLE_API_KEY)
 
 # Best model for Arabic: native Arabic training, cheap, fast
 # $0.30/M input + $1.80/M output — perfect for short job titles
-TRANSLATE_MODEL     = "qwen/qwen2.5-72b-instruct"
+TRANSLATE_MODEL     = "qwen/qwen-2.5-72b-instruct"
 TRANSLATE_BATCH     = 15   # titles per API call — reduces cost by 15x
 TRANSLATE_MAX_RETRY = 3
 
@@ -156,7 +156,7 @@ def http_post_json(url: str, payload: dict, headers: dict = None, timeout: int =
 #    • Translate ONLY title_en (8-12 words avg) — not description
 #    • Send 15 titles per API call (15x cheaper than 1 per call)
 #    • Skip any job where title_ar is already filled
-#    • Model: qwen/qwen2.5-32b-instruct — best Arabic quality at lowest price
+#    • Model: qwen/qwen-2.5-72b-instruct — best Arabic quality at lowest price
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def batch_translate(titles: list[str]) -> list[str]:
