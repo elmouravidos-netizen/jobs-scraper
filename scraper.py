@@ -334,11 +334,15 @@ async def fetch_adzuna() -> list[dict]:
                 sal_min = job.get("salary_min")
                 sal_max = job.get("salary_max")
                 salary  = f"{sal_min:.0f}-{sal_max:.0f} AED" if sal_min and sal_max else ""
+                # Use real posting date from Adzuna (field: "created")
+                real_date = job.get("created", "")
                 if not title:
                     continue
                 j = build_job("Adzuna", jid, title, company, country, link, desc)
                 j["location_city"] = loc
                 j["salary_range"]  = salary
+                if real_date:
+                    j["posted_at"] = real_date
                 jobs.append(j)
         except Exception as e:
             log.warning(f"   Adzuna error: {e}")
@@ -382,12 +386,15 @@ async def fetch_jooble() -> list[dict]:
                 desc    = re.sub(r'<[^>]+>', ' ', job.get("snippet", "")).strip()[:300]
                 salary  = job.get("salary", "")
                 loc     = job.get("location", "")
-                jid     = str(job.get("id", "") or make_key("jooble_raw", title + loc))
+                jid       = str(job.get("id", "") or make_key("jooble_raw", title + loc))
+                real_date = job.get("updated", "")
                 if not title:
                     continue
                 j = build_job("Jooble", jid, title, company, country, link, desc)
                 j["location_city"] = loc
                 j["salary_range"]  = salary
+                if real_date:
+                    j["posted_at"] = real_date
                 jobs.append(j)
             await asyncio.sleep(0.3)
         except Exception as e:
