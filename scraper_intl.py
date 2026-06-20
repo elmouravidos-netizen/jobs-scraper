@@ -50,7 +50,9 @@ log.info(f"{'✅' if TRANSLATE_ENABLED else '⏭ '} OpenRouter translation {'ENA
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-MAX_PER_COUNTRY = 60   # jobs scraped per country per run
+MAX_PER_COUNTRY     = 30   # jobs scraped per country per run
+MAX_DESC_FETCHES    = 50   # cap on detail-page visits per run (prevents timeout)
+DESC_FETCH_TIMEOUT  = 15   # seconds per detail page — fail fast, don't hang
 
 # ── Target countries — matches your homepage country focus ────────────────────
 COUNTRIES = [
@@ -179,24 +181,29 @@ async def scrape_country(ctx, country_code: str, country_name: str) -> list[dict
 
 
 async def fetch_job_description(ctx, job: dict) -> str:
-    """Fetch the full description from a job's detail page."""
+    """Fetch the full description from a job's detail page.
+    Uses a short timeout — fails fast rather than hanging the whole run."""
     page = await ctx.new_page()
     try:
-        await page.goto(job["source_url"], wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(1500)
+        await page.goto(
+            job["source_url"],
+            wait_until="domcontentloaded",
+            timeout=DESC_FETCH_TIMEOUT * 1000
+        )
+        await page.wait_for_timeout(1000)
 
         # Try common description container selectors
         for sel in ["main", "article", "[class*='description']", "[class*='content']"]:
             try:
-                text = await page.locator(sel).first.inner_text()
+                text = await page.locator(sel).first.inner_text(timeout=3000)
                 if text and len(text) > 200:
                     return text.strip()[:2000]
             except Exception:
                 continue
 
         return ""
-    except Exception as e:
-        log.debug(f"   description fetch err: {e}")
+    except (PlaywrightTimeout, Exception) as e:
+        log.debug(f"   description fetch timeout/err: {e}")
         return ""
     finally:
         await page.close()
@@ -264,12 +271,17 @@ async def main():
         log.info(f"🆕 New jobs: {len(new_jobs)}")
 
         # ── Phase 3: Fetch full descriptions for new jobs only ────────────────
-        # (only do this for NEW jobs to save time — existing jobs are skipped anyway)
-        log.info("\n── Fetching full descriptions for new jobs ──")
-        for job in new_jobs:
+        # Capped at MAX_DESC_FETCHES to prevent GitHub Actions timeout —
+        # jobs beyond the cap still get saved, just without full description
+        log.info(f"\n── Fetching full descriptions (capped at {MAX_DESC_FETCHES}) ──")
+        fetch_count = min(len(new_jobs), MAX_DESC_FETCHES)
+        for i, job in enumerate(new_jobs[:fetch_count]):
+            log.info(f"   [{i+1}/{fetch_count}] {job['title_en'][:50]}")
             desc = await fetch_job_description(ctx, job)
             if desc:
                 job["description_en"] = desc
+        if len(new_jobs) > MAX_DESC_FETCHES:
+            log.info(f"   ⏭  {len(new_jobs) - MAX_DESC_FETCHES} jobs will use card preview text only (cap reached)")
 
         await browser.close()
 
