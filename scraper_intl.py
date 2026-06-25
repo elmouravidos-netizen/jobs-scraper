@@ -182,7 +182,8 @@ async def scrape_country(ctx, country_code: str, country_name: str) -> list[dict
 
 async def fetch_job_description(ctx, job: dict) -> str:
     """Fetch the full description from a job's detail page.
-    Uses a short timeout — fails fast rather than hanging the whole run."""
+    Uses a short timeout — fails fast rather than hanging the whole run.
+    Cuts before report form / UI elements that are not part of the description."""
     page = await ctx.new_page()
     try:
         await page.goto(
@@ -192,12 +193,39 @@ async def fetch_job_description(ctx, job: dict) -> str:
         )
         await page.wait_for_timeout(1000)
 
-        # Try common description container selectors
-        for sel in ["main", "article", "[class*='description']", "[class*='content']"]:
+        # Phrases that signal end of real description — report forms, UI noise
+        CUTOFF_PHRASES = [
+            "الإبلاغ عن الإعلان",
+            "سبب الإبلاغ",
+            "Report this job",
+            "Flag this job",
+            "احتيالي",
+            "رابط معطوب",
+            "Report Job",
+            "Is this job ad",
+        ]
+
+        for sel in [
+            "[class*='job-description']",
+            "[class*='description']",
+            "[class*='job-detail']",
+            "[class*='job_detail']",
+            "[class*='content']",
+            "article",
+            "main",
+        ]:
             try:
                 text = await page.locator(sel).first.inner_text(timeout=3000)
-                if text and len(text) > 200:
-                    return text.strip()[:2000]
+                if not text or len(text) < 100:
+                    continue
+
+                # Cut before any report form or UI noise
+                for phrase in CUTOFF_PHRASES:
+                    if phrase in text:
+                        text = text[:text.index(phrase)].strip()
+
+                if len(text) > 100:
+                    return text[:2000]
             except Exception:
                 continue
 
