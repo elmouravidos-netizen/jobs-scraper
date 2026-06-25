@@ -195,13 +195,14 @@ async def fetch_job_description(ctx, job: dict) -> str:
 
         # Phrases that signal end of real description — report forms, UI noise
         CUTOFF_PHRASES = [
+            "Report this ad",
+            "Report this job",
             "الإبلاغ عن الإعلان",
             "سبب الإبلاغ",
-            "Report this job",
             "Flag this job",
             "احتيالي",
             "رابط معطوب",
-            "Report Job",
+            "Reason for",
             "Is this job ad",
         ]
 
