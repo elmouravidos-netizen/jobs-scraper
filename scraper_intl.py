@@ -194,16 +194,18 @@ async def fetch_job_description(ctx, job: dict) -> str:
         await page.wait_for_timeout(1000)
 
         # Phrases that signal end of real description — report forms, UI noise
+        # Uses case-insensitive matching
         CUTOFF_PHRASES = [
+            "REPORT THIS AD",
             "Report this ad",
+            "report this ad",
+            "REPORT THIS JOB",
             "Report this job",
             "الإبلاغ عن الإعلان",
             "سبب الإبلاغ",
             "Flag this job",
             "احتيالي",
             "رابط معطوب",
-            "Reason for",
-            "Is this job ad",
         ]
 
         for sel in [
@@ -220,10 +222,14 @@ async def fetch_job_description(ctx, job: dict) -> str:
                 if not text or len(text) < 100:
                     continue
 
-                # Cut before any report form or UI noise
+                # Case-insensitive cut before report form
+                text_lower = text.lower()
+                cut_at = len(text)
                 for phrase in CUTOFF_PHRASES:
-                    if phrase in text:
-                        text = text[:text.index(phrase)].strip()
+                    idx = text_lower.find(phrase.lower())
+                    if idx != -1 and idx < cut_at:
+                        cut_at = idx
+                text = text[:cut_at].strip()
 
                 if len(text) > 100:
                     return text[:2000]
