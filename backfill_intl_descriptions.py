@@ -48,26 +48,30 @@ PAUSE_BETWEEN      = 0.8   # seconds between jobs
 
 # Phrases that indicate we scraped UI noise instead of real description
 CUTOFF_PHRASES = [
+    "REPORT THIS AD",
     "Report this ad",
+    "report this ad",
+    "REPORT THIS JOB",
     "Report this job",
     "الإبلاغ عن الإعلان",
     "سبب الإبلاغ",
     "Flag this job",
     "احتيالي",
     "رابط معطوب",
-    "Reason for",
-    "Is this job ad",
 ]
 
 
 def clean_description(text: str) -> str:
-    """Cut before report form content, clean whitespace."""
+    """Cut before report form content using case-insensitive matching."""
     if not text:
         return ""
+    text_lower = text.lower()
+    cut_at = len(text)
     for phrase in CUTOFF_PHRASES:
-        if phrase in text:
-            text = text[:text.index(phrase)].strip()
-    # Clean excessive whitespace
+        idx = text_lower.find(phrase.lower())
+        if idx != -1 and idx < cut_at:
+            cut_at = idx
+    text = text[:cut_at].strip()
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r' {2,}', ' ', text)
     return text.strip()[:2000]
