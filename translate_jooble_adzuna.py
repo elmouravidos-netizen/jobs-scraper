@@ -1,16 +1,23 @@
 """
 ONE-TIME BACKFILL: Translate Jooble/Adzuna descriptions to Arabic using Gemini (FREE)
 Finds jobs with description_en but no description_ar, translates them.
+
 Usage:
-export GEMINI_API_KEY="your_key"
+export SUPABASE_URL="your_url"
+export SUPABASE_SERVICE_ROLE_KEY="your_key"
+export GEMINI_API_KEY="your_gemini_key"
 python translate_jooble_adzuna.py
 """
 import os
 import re
 import time
 import logging
+import warnings
 import google.generativeai as genai
 from supabase import create_client, Client
+
+# Suppress the deprecation warning (the package still works perfectly fine)
+warnings.filterwarnings("ignore", category=FutureWarning, module="google.generativeai")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,34 +27,38 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Credentials ────────────────────────────────────────────────────────────
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-if not GEMINI_API_KEY:
-    raise ValueError("❌ GEMINI_API_KEY not set. Get one at https://aistudio.google.com/apikey")
+if not all([SUPABASE_URL, SUPABASE_KEY, GEMINI_API_KEY]):
+    raise ValueError("❌ Missing environment variables. Ensure SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, and GEMINI_API_KEY are set.")
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash")
+# Using gemini-1.5-flash as it is the most stable, fastest, and 100% free model
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ── Config ─────────────────────────────────────────────────────────────────
-BATCH_SIZE = 10
-PAUSE_BETWEEN = 2.0
-FETCH_LIMIT = 500  # jobs per run
+FETCH_LIMIT = 500      # jobs per run to stay well within GitHub Actions limits
+PAUSE_BETWEEN = 1.5    # seconds between requests to be safe with rate limits
 
 def translate_description(title_en: str, description_en: str) -> str:
     """Translate job description to Arabic using Gemini."""
+    # Clean HTML tags and normalize whitespace
     clean_desc = re.sub(r'<[^>]+>', ' ', description_en or '').strip()
-    clean_desc = re.sub(r'\s+', ' ', clean_desc)[:1500]
+    clean_desc = re.sub(r'\s+', ' ', clean_desc)[:1500] # Cap length for cost/speed
     
-    prompt = f"""You are a professional HR translator. Translate this job posting into clear, professional Arabic.
+    prompt = f"""You are a professional HR translator. Translate this job posting into clear, professional, modern business Arabic.
 
 Job Title: {title_en}
 Job Description: {clean_desc}
 
-Return ONLY the Arabic translation, no explanations or extra text."""
+Instructions:
+1. Return ONLY the Arabic translation.
+2. Do not include any explanations, introductory text, or extra notes.
+3. Preserve technical terms and company names accurately."""
     
     try:
         response = model.generate_content(
@@ -66,13 +77,14 @@ def main():
     log.info("🚀 Starting Jooble/Adzuna description translation...")
     
     # Fetch jobs needing translation
+    # FIXED: Use .not_.is_("column", "null") for IS NOT NULL in modern supabase-py
     result = (
         supabase.table("jobs")
         .select("id, title_en, description_en, source_platform")
         .in_("source_platform", ["Jooble", "Adzuna"])
         .eq("is_active", True)
-        .not_("description_en", "is", None)
-        .is_("description_ar", None)
+        .not_.is_("description_en", "null")       # <-- CORRECTED SYNTAX
+        .is_("description_ar", "null")            # <-- CORRECTED SYNTAX
         .limit(FETCH_LIMIT)
         .execute()
     )
@@ -91,7 +103,7 @@ def main():
         
         desc_ar = translate_description(job['title_en'], job['description_en'])
         
-        if desc_ar:
+        if desc_ar and len(desc_ar) > 20: # Sanity check to ensure we got real text
             try:
                 supabase.table("jobs").update({
                     "description_ar": desc_ar,
@@ -103,6 +115,7 @@ def main():
                 log.error(f"  ❌ DB update error: {e}")
                 failed += 1
         else:
+            log.warning(f"  ⚠️ Empty or too short translation result, skipping update")
             failed += 1
         
         # Pause to respect rate limits
@@ -112,7 +125,7 @@ def main():
     log.info(f"\n{'='*55}")
     log.info(f"🏁 Complete!")
     log.info(f"   ✅ Translated: {translated}")
-    log.info(f"   ❌ Failed: {failed}")
+    log.info(f"   ❌ Failed/Skipped: {failed}")
     log.info(f"{'='*55}")
 
 if __name__ == "__main__":
