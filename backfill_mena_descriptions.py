@@ -173,14 +173,12 @@ async def ai_clean_and_translate_batch(jobs_batch: list[dict]) -> list[str]:
 
     prompt = (
         "You are a professional Arabic HR content writer. For each numbered job below, "
-        "write a clean, professional Arabic job description of 100-150 words based on the "
-        "raw scraped text. Ignore any navigation menus, ads, or unrelated site content in "
-        "the raw text — extract only genuine job information (responsibilities, requirements, "
-        "what the role involves). If the raw text has no usable job information, write a "
-        "reasonable general Arabic description based on the job title alone.\n\n"
-        "Return ONLY a JSON array of strings, one per job, in the same order. No explanations, "
-        "no markdown, no extra text — just the raw JSON array.\n\n"
-        + "\n\n".join(entries)
+        "write a clean, professional Arabic job description of 80-120 words. "
+        "If the 'Raw text' contains real job details, summarize them professionally. "
+        "CRITICAL: If the 'Raw text' is empty, says '(no content available)', or contains no usable info, "
+        "you MUST invent a highly professional, realistic, and generic Arabic job description "
+        "based SOLELY on the 'Title'. Do not return an empty string. Do not say 'no info available'.\n\n"
+        "Return ONLY a valid JSON
     )
 
     payload = {
