@@ -219,7 +219,7 @@ def save_description(job_key: str, description_en: str, description_ar: str) -> 
     try:
         update = {
             "description_ar": description_ar,
-            "translation_status": "completed",  # ✅ Mark as completed
+            "translation_status": "completed",
         }
         if description_en:
             update["description_en"] = description_en
@@ -265,39 +265,57 @@ async def main():
     log.info(f"   ✅ Got real content for {scraped_ok}/{len(jobs)} jobs")
 
     # ── Phase 2: AI clean + translate in batches ────────────────────────────
-    log.info("\n── Phase 2: AI cleanup & Arabic translation ──")
-    saved = failed = 0
-    for i in range(0, len(jobs), AI_BATCH_SIZE):
-        batch = jobs[i:i + AI_BATCH_SIZE]
-        log.info(f"\n  🤖 Processing batch {i // AI_BATCH_SIZE + 1} ({len(batch)} jobs)...")
-        arabic_descriptions = await ai_clean_and_translate_batch(batch)
+    async def ai_clean_and_translate_batch(jobs_batch: list[dict]) -> list[str]:
+    """
+    Takes jobs with a `raw_text` field (already scraped) and returns a list of
+    clean Arabic descriptions (~100-150 words each), same order as input.
+    Falls back to empty string per-job on failure — never crashes the batch.
+    """
+    entries = []
+    for i, j in enumerate(jobs_batch):
+        raw = j["raw_text"] if j["raw_text"] else "(no content available)"
+        entries.append(f"### Job {i+1}\nTitle: {j['title_en']}\nRaw text: {raw}")
 
-        for job, desc_ar in zip(batch, arabic_descriptions):
-            # description_en: use a trimmed version of the raw scraped text if we got one
-            desc_en = job["raw_text"][:600] if job["raw_text"] else ""
-            if desc_ar:
-                ok = save_description(job["job_key"], desc_en, desc_ar)
-                if ok:
-                    log.info(f"    ✅ {job['title_en'][:40]}")
-                    saved += 1
-                else:
-                    failed += 1
-            else:
-                log.warning(f"    ⏭  Skipped (no AI result): {job['title_en'][:40]}")
-                failed += 1
+    jobs_list = "\n\n".join(entries)
+    
+    prompt = (
+        "You are a professional Arabic HR content writer. For each numbered job below, "
+        "write a clean, professional Arabic job description of 100-150 words based on the "
+        "raw scraped text. Ignore any navigation menus, ads, or unrelated site content in "
+        "the raw text — extract only genuine job information (responsibilities, requirements, "
+        "what the role involves). If the raw text has no usable job information, write a "
+        "reasonable general Arabic description based on the job title alone.\n\n"
+        "Return ONLY a JSON array of strings, one per job, in the same order. No explanations, "
+        "no markdown, no extra text — just the raw JSON array.\n\n"
+        + jobs_list
+    )
 
-        if i + AI_BATCH_SIZE < len(jobs):
-            await asyncio.sleep(1)
-
-    elapsed = (datetime.now() - start).seconds
-    log.info(f"\n{'='*60}")
-    log.info(f"🏁 Done in {elapsed}s")
-    log.info(f"   📦 Processed: {len(jobs)}")
-    log.info(f"   ✅ Saved:     {saved}")
-    log.info(f"   ❌ Failed:    {failed}")
-    log.info(f"   ℹ️  Remaining jobs will be picked up on the next scheduled run")
-    log.info(f"{'='*60}")
-
+    payload = {
+        "model": TRANSLATE_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 2200,
+        "temperature": 0.3,
+    }
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "HTTP-Referer":  "https://github.com/mena-jobs-scraper",
+        "X-Title":       "MENA Jobs Description Backfill",
+    }
+    for attempt in range(1, 4):
+        try:
+            resp = http_post_json("https://openrouter.ai/api/v1/chat/completions", payload, headers)
+            raw_content = resp["choices"][0]["message"]["content"].strip()
+            # Strip markdown code fences if the model added them despite instructions
+            raw_content = re.sub(r'^```json\s*|\s*```$', '', raw_content.strip())
+            parsed = json.loads(raw_content)
+            if isinstance(parsed, list) and len(parsed) == len(jobs_batch):
+                return [str(x).strip() for x in parsed]
+            log.warning(f"   AI batch returned wrong shape (attempt {attempt}), retrying")
+        except Exception as e:
+            log.warning(f"   AI batch attempt {attempt}/3 failed: {e}")
+            await asyncio.sleep(2 ** attempt)
+    log.error("   ❌ AI batch failed all attempts — leaving these jobs for next run")
+    return [""] * len(jobs_batch)
 
 if __name__ == "__main__":
     asyncio.run(main())
