@@ -219,13 +219,10 @@ def save_description(job_key: str, description_en: str, description_ar: str) -> 
     try:
         update = {
             "description_ar": description_ar,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "translation_status": "completed",  # ✅ Mark as completed
         }
-        # Only overwrite description_en if we actually got real scraped text —
-        # never wipe it back to empty on a failed scrape.
         if description_en:
             update["description_en"] = description_en
-
         supabase.table("jobs").update(update).eq("job_key", job_key).execute()
         return True
     except Exception as e:
