@@ -1,0 +1,27 @@
+name: Translate Jooble & Adzuna Descriptions
+on:
+  workflow_dispatch:  # Manual trigger only - runs when YOU click the button
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install google-generativeai supabase
+      
+      - name: Run translation
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python translate_jooble_adzuna.py
