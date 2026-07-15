@@ -253,7 +253,7 @@ async def translate_and_save_batch(new_jobs: list[dict]) -> tuple[int, int]:
         for job, title_ar in zip(batch, arabic_titles):
             job["title_ar"]           = title_ar
             job["description_ar"]     = ""          # skip desc translation — saves 70% cost
-            job["translation_status"] = "completed" if title_ar else "pending"
+            job["translation_status"] = "pending"
             try:
                 supabase.table("jobs").insert(job).execute()
                 log.info(f"    ✅ [{job['source_platform']:14}][{job['country']}][{job['job_category']:14}] {job['title_en'][:35]} → {title_ar[:30]}")
