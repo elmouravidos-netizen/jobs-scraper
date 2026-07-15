@@ -116,21 +116,23 @@ def http_post_json(url: str, payload: dict, headers: dict = None, timeout: int =
         return json.loads(r.read().decode("utf-8"))
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  TRANSLATION (OpenRouter — Qwen 2.5 72B)
-# ══════════════════════════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════════════════════════
+TRANSLATION (Google Gemini — FREE, with OpenRouter fallback)
+══════════════════════════════════════════════════════════════════════════════
+import google.generativeai as genai
 
-TRANSLATE_MODEL = "qwen/qwen-2.5-72b-instruct"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_model = genai.GenerativeModel("gemini-2.5-flash")
 
 async def batch_translate_titles(titles: list[str], api_key: str) -> list[str]:
-    """
-    Translate a batch of job TITLES only — used for MENA jobs
-    where descriptions are mostly just source URLs (not worth translating).
-    """
-    if not api_key or not titles:
+    """Translate job TITLES using Gemini (FREE) with OpenRouter fallback."""
+    if not titles:
         return [""] * len(titles)
-
+    
     numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
     prompt = (
         "You are a professional HR translator. "
@@ -139,76 +141,111 @@ async def batch_translate_titles(titles: list[str], api_key: str) -> list[str]:
         "No explanations. No extra text.\n\n"
         f"{numbered}"
     )
-    return await _call_openrouter_batch(prompt, len(titles), api_key)
-
+    
+    # Try Gemini first (FREE)
+    if GEMINI_API_KEY:
+        try:
+            response = await asyncio.to_thread(
+                gemini_model.generate_content,
+                prompt,
+                genai.types.GenerationConfig(temperature=0.1, max_output_tokens=600)
+            )
+            raw = response.text.strip()
+            results = [""] * len(titles)
+            for line in raw.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                m = re.match(r'^(\d+)[.\)]\s*(.+)$', line)
+                if m:
+                    idx = int(m.group(1)) - 1
+                    if 0 <= idx < len(titles):
+                        results[idx] = m.group(2).strip()
+            filled = sum(1 for r in results if r)
+            if filled >= len(titles) * 0.5:
+                log.info(f"  ✅ Gemini batch translated {filled}/{len(titles)} titles")
+                return results
+        except Exception as e:
+            log.warning(f"  ⚠ Gemini failed: {e}, falling back to OpenRouter")
+    
+    # Fallback to OpenRouter if Gemini fails
+    return await _call_openrouter_batch(prompt, len(titles), OPENROUTER_API_KEY)
 
 async def translate_title_and_description(title: str, description: str, api_key: str) -> tuple[str, str]:
-    """
-    Translate BOTH title and description — used for international jobs
-    where we have real, unique, full descriptions worth translating
-    fully to avoid duplicate content and add genuine value for Arab users.
-    """
-    if not api_key or not title:
+    """Translate BOTH title and description using Gemini (FREE) with OpenRouter fallback."""
+    if not title:
         return "", ""
-
-    # Strip HTML before translating
+    
     clean_desc = re.sub(r'<[^>]+>', ' ', description or '').strip()
-    clean_desc = re.sub(r'\s+', ' ', clean_desc)[:1500]  # cap length for cost control
-
+    clean_desc = re.sub(r'\s+', ' ', clean_desc)[:1500]
+    
     prompt = (
         "You are a professional HR translator specializing in international "
         "employment contracts for Arabic-speaking job seekers. "
         "Translate the following job posting into clear, professional, "
         "modern business Arabic. Preserve all technical terms, company names, "
-        "and visa/program names accurately (e.g. keep 'EU Blue Card' recognizable). "
+        "and visa/program names accurately.\n\n"
         "Return your response in EXACTLY this format with no extra text:\n\n"
         "TITLE: [arabic title here]\n"
         "DESCRIPTION: [arabic description here]\n\n"
         f"Original Title: {title}\n"
         f"Original Description: {clean_desc}"
     )
-
+    
+    # Try Gemini first (FREE)
+    if GEMINI_API_KEY:
+        try:
+            response = await asyncio.to_thread(
+                gemini_model.generate_content,
+                prompt,
+                genai.types.GenerationConfig(temperature=0.2, max_output_tokens=1200)
+            )
+            raw = response.text.strip()
+            title_match = re.search(r'TITLE:\s*(.+?)(?:\n|$)', raw)
+            desc_match = re.search(r'DESCRIPTION:\s*(.+)', raw, re.DOTALL)
+            title_ar = title_match.group(1).strip() if title_match else ""
+            desc_ar = desc_match.group(1).strip() if desc_match else ""
+            if title_ar:
+                log.info(f"  ✅ Gemini translation successful")
+                return title_ar, desc_ar
+        except Exception as e:
+            log.warning(f"  ⚠ Gemini failed: {e}, falling back to OpenRouter")
+    
+    # Fallback to OpenRouter
     for attempt in range(1, 4):
         try:
             payload = {
-                "model": TRANSLATE_MODEL,
+                "model": "qwen/qwen-2.5-72b-instruct",
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": 1200,
                 "temperature": 0.2,
             }
             headers = {
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                 "HTTP-Referer": "https://github.com/mena-jobs-scraper",
                 "X-Title": "International Jobs Translator",
             }
-            resp = http_post_json(
-                "https://openrouter.ai/api/v1/chat/completions",
-                payload, headers
-            )
+            resp = http_post_json("https://openrouter.ai/api/v1/chat/completions", payload, headers)
             raw = resp["choices"][0]["message"]["content"].strip()
-
             title_match = re.search(r'TITLE:\s*(.+?)(?:\n|$)', raw)
-            desc_match  = re.search(r'DESCRIPTION:\s*(.+)', raw, re.DOTALL)
-
+            desc_match = re.search(r'DESCRIPTION:\s*(.+)', raw, re.DOTALL)
             title_ar = title_match.group(1).strip() if title_match else ""
-            desc_ar  = desc_match.group(1).strip() if desc_match else ""
-
+            desc_ar = desc_match.group(1).strip() if desc_match else ""
             if title_ar:
                 return title_ar, desc_ar
-
-            log.warning(f"  Translation parse failed, attempt {attempt}/3")
             await asyncio.sleep(2)
-
         except Exception as e:
             log.warning(f"  Translation attempt {attempt}/3 failed: {e}")
             await asyncio.sleep(2 ** attempt)
-
     return "", ""
 
-
 async def _call_openrouter_batch(prompt: str, expected_count: int, api_key: str) -> list[str]:
+    """OpenRouter fallback for batch translation."""
+    if not api_key:
+        return [""] * expected_count
+    
     payload = {
-        "model": TRANSLATE_MODEL,
+        "model": "qwen/qwen-2.5-72b-instruct",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 800,
         "temperature": 0.1,
@@ -218,16 +255,11 @@ async def _call_openrouter_batch(prompt: str, expected_count: int, api_key: str)
         "HTTP-Referer": "https://github.com/mena-jobs-scraper",
         "X-Title": "MENA Jobs Scraper",
     }
-
     for attempt in range(1, 4):
         try:
-            resp = http_post_json(
-                "https://openrouter.ai/api/v1/chat/completions",
-                payload, headers
-            )
+            resp = http_post_json("https://openrouter.ai/api/v1/chat/completions", payload, headers)
             raw = resp["choices"][0]["message"]["content"].strip()
             results = [""] * expected_count
-
             for line in raw.split("\n"):
                 line = line.strip()
                 if not line:
@@ -237,20 +269,14 @@ async def _call_openrouter_batch(prompt: str, expected_count: int, api_key: str)
                     idx = int(m.group(1)) - 1
                     if 0 <= idx < expected_count:
                         results[idx] = m.group(2).strip()
-
             filled = sum(1 for r in results if r)
             if filled >= expected_count * 0.5:
                 return results
-
-            log.warning(f"  Batch parse low quality ({filled}/{expected_count}), retry {attempt}")
             await asyncio.sleep(2)
-
         except Exception as e:
-            log.warning(f"  Translation attempt {attempt}/3: {e}")
+            log.warning(f"  Batch attempt {attempt}/3: {e}")
             await asyncio.sleep(2 ** attempt)
-
     return [""] * expected_count
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SUPABASE HELPERS
