@@ -178,7 +178,8 @@ async def ai_clean_and_translate_batch(jobs_batch: list[dict]) -> list[str]:
         "CRITICAL: If the 'Raw text' is empty, says '(no content available)', or contains no usable info, "
         "you MUST invent a highly professional, realistic, and generic Arabic job description "
         "based SOLELY on the 'Title'. Do not return an empty string. Do not say 'no info available'.\n\n"
-        "Return ONLY a valid JSON
+        "Return ONLY a valid JSON array of strings, one per job, in the same order as the "
+        "numbered jobs above. No markdown, no code fences, no extra commentary — just the raw JSON array."
     )
 
     payload = {
@@ -265,57 +266,33 @@ async def main():
     log.info(f"   ✅ Got real content for {scraped_ok}/{len(jobs)} jobs")
 
     # ── Phase 2: AI clean + translate in batches ────────────────────────────
-    async def ai_clean_and_translate_batch(jobs_batch: list[dict]) -> list[str]:
-    """
-    Takes jobs with a `raw_text` field (already scraped) and returns a list of
-    clean Arabic descriptions (~100-150 words each), same order as input.
-    Falls back to empty string per-job on failure — never crashes the batch.
-    """
-    entries = []
-    for i, j in enumerate(jobs_batch):
-        raw = j["raw_text"] if j["raw_text"] else "(no content available)"
-        entries.append(f"### Job {i+1}\nTitle: {j['title_en']}\nRaw text: {raw}")
+    log.info("\n── Phase 2: AI cleaning + Arabic translation ──")
+    for start_idx in range(0, len(jobs), AI_BATCH_SIZE):
+        chunk = jobs[start_idx:start_idx + AI_BATCH_SIZE]
+        descriptions_ar = await ai_clean_and_translate_batch(chunk)
+        for j, desc_ar in zip(chunk, descriptions_ar):
+            j["description_ar"] = desc_ar
+        log.info(f"   ✅ Translated batch {start_idx // AI_BATCH_SIZE + 1} "
+                  f"({start_idx + len(chunk)}/{len(jobs)} jobs)")
 
-    jobs_list = "\n\n".join(entries)
-    
-    prompt = (
-        "You are a professional Arabic HR content writer. For each numbered job below, "
-        "write a clean, professional Arabic job description of 100-150 words based on the "
-        "raw scraped text. Ignore any navigation menus, ads, or unrelated site content in "
-        "the raw text — extract only genuine job information (responsibilities, requirements, "
-        "what the role involves). If the raw text has no usable job information, write a "
-        "reasonable general Arabic description based on the job title alone.\n\n"
-        "Return ONLY a JSON array of strings, one per job, in the same order. No explanations, "
-        "no markdown, no extra text — just the raw JSON array.\n\n"
-        + jobs_list
-    )
+    # ── Phase 3: save results back to Supabase ──────────────────────────────
+    log.info("\n── Phase 3: Saving to Supabase ──")
+    saved = 0
+    for j in jobs:
+        description_ar = j.get("description_ar", "")
+        if not description_ar:
+            log.warning(f"   ⚠ Skipping save for {j['job_key']} — no AI description produced")
+            continue
 
-    payload = {
-        "model": TRANSLATE_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 2200,
-        "temperature": 0.3,
-    }
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "HTTP-Referer":  "https://github.com/mena-jobs-scraper",
-        "X-Title":       "MENA Jobs Description Backfill",
-    }
-    for attempt in range(1, 4):
-        try:
-            resp = http_post_json("https://openrouter.ai/api/v1/chat/completions", payload, headers)
-            raw_content = resp["choices"][0]["message"]["content"].strip()
-            # Strip markdown code fences if the model added them despite instructions
-            raw_content = re.sub(r'^```json\s*|\s*```$', '', raw_content.strip())
-            parsed = json.loads(raw_content)
-            if isinstance(parsed, list) and len(parsed) == len(jobs_batch):
-                return [str(x).strip() for x in parsed]
-            log.warning(f"   AI batch returned wrong shape (attempt {attempt}), retrying")
-        except Exception as e:
-            log.warning(f"   AI batch attempt {attempt}/3 failed: {e}")
-            await asyncio.sleep(2 ** attempt)
-    log.error("   ❌ AI batch failed all attempts — leaving these jobs for next run")
-    return [""] * len(jobs_batch)
+        # Use the real scraped text (trimmed) as the new English snippet, if we have one
+        description_en = j["raw_text"][:300] if j.get("raw_text") else ""
+
+        if save_description(j["job_key"], description_en, description_ar):
+            saved += 1
+
+    elapsed = (datetime.now() - start).total_seconds()
+    log.info(f"\n🏁 Done — {saved}/{len(jobs)} jobs updated in {elapsed:.1f}s")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
