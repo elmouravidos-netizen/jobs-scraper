@@ -30,10 +30,8 @@ TRANSLATE_ENABLED   = bool(OPENROUTER_API_KEY)
 ADZUNA_ENABLED      = bool(ADZUNA_APP_ID and ADZUNA_APP_KEY)
 JOOBLE_ENABLED      = bool(JOOBLE_API_KEY)
 
-# Best model for Arabic: native Arabic training, cheap, fast
-# $0.30/M input + $1.80/M output — perfect for short job titles
 TRANSLATE_MODEL     = "qwen/qwen-2.5-72b-instruct"
-TRANSLATE_BATCH     = 15   # titles per API call — reduces cost by 15x
+TRANSLATE_BATCH     = 15
 TRANSLATE_MAX_RETRY = 3
 
 log.info(f"{'✅' if TRANSLATE_ENABLED  else '⏭ '} OpenRouter translation {'ENABLED — ' + TRANSLATE_MODEL if TRANSLATE_ENABLED else 'SKIPPED'}")
@@ -49,6 +47,40 @@ MAX_PER_SOURCE = 50
 
 def make_key(platform: str, uid: str) -> str:
     return hashlib.sha256(f"{platform}::{uid}".encode()).hexdigest()
+
+
+def normalize_text(text: str) -> str:
+    """
+    Aggressively normalize text for dedup fingerprinting only
+    (never used for display — display always uses the original field).
+    Lowercases, strips punctuation/extra whitespace, drops common
+    noise words that cause false "different job" matches
+    (e.g. "Sales Associate - Apparel Group (Dubai)" vs
+    "Sales Associate | Apparel Group – Dubai Mall").
+    """
+    if not text:
+        return ""
+    t = text.lower().strip()
+    t = re.sub(r'[^\w\s]', ' ', t)
+    t = re.sub(r'\s+', ' ', t).strip()
+    noise = {
+        'urgent', 'immediate', 'hiring', 'new', 'job', 'jobs', 'vacancy',
+        'vacancies', 'opportunity', 'position', 'full', 'time', 'part',
+    }
+    tokens = [w for w in t.split() if w not in noise]
+    return ' '.join(tokens)
+
+
+def make_content_key(title: str, company: str, country: str) -> str:
+    """
+    Fingerprint based on WHAT the job actually is, not WHERE it was
+    scraped from or which listing ID the source platform assigned.
+    Catches:
+      - The same job reposted by the source with a new listing ID
+      - The same job appearing on two different platforms
+    """
+    fingerprint = f"{normalize_text(title)}::{normalize_text(company)}::{(country or '').upper()}"
+    return hashlib.sha256(fingerprint.encode()).hexdigest()
 
 
 def clean_url(url: str) -> str:
@@ -113,6 +145,7 @@ def build_job(platform, uid, title, company, country, url, description="") -> di
     c = clean_url(url)
     return {
         "job_key":            make_key(platform.lower(), uid),
+        "content_key":        make_content_key(title, company, country),
         "title_en":           title.strip(),
         "company_name":       (company or "Unknown").strip(),
         "description_en":     description.strip() if description else f"Full details at {c}",
@@ -151,24 +184,13 @@ def http_post_json(url: str, payload: dict, headers: dict = None, timeout: int =
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  BATCH TRANSLATION — OpenRouter (ultra low cost)
-#  Strategy:
-#    • Translate ONLY title_en (8-12 words avg) — not description
-#    • Send 15 titles per API call (15x cheaper than 1 per call)
-#    • Skip any job where title_ar is already filled
-#    • Model: qwen/qwen-2.5-72b-instruct — best Arabic quality at lowest price
+#  BATCH TRANSLATION — OpenRouter
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def batch_translate(titles: list[str]) -> list[str]:
-    """
-    Translate a list of job titles to Arabic in ONE API call.
-    Returns a list of Arabic strings in the same order.
-    Falls back to empty strings on any error.
-    """
     if not TRANSLATE_ENABLED or not titles:
         return [""] * len(titles)
 
-    # Build a numbered list prompt — model returns numbered Arabic list
     numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
     prompt = (
         "You are a professional HR translator. "
@@ -184,7 +206,7 @@ async def batch_translate(titles: list[str]) -> list[str]:
         "model": TRANSLATE_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 600,
-        "temperature": 0.1,   # low temp = consistent translations
+        "temperature": 0.1,
     }
     headers = {
         "Authorization":  f"Bearer {OPENROUTER_API_KEY}",
@@ -200,7 +222,6 @@ async def batch_translate(titles: list[str]) -> list[str]:
             )
             raw = resp["choices"][0]["message"]["content"].strip()
 
-            # Parse numbered list back to array
             results = [""] * len(titles)
             for line in raw.split("\n"):
                 line = line.strip()
@@ -212,7 +233,6 @@ async def batch_translate(titles: list[str]) -> list[str]:
                     if 0 <= idx < len(titles):
                         results[idx] = m.group(2).strip()
 
-            # Validate — if we got back less than 50% fill, retry
             filled = sum(1 for r in results if r)
             if filled < len(titles) * 0.5:
                 log.warning(f"   Batch parse low quality ({filled}/{len(titles)}) attempt {attempt}, retrying")
@@ -232,10 +252,8 @@ async def batch_translate(titles: list[str]) -> list[str]:
 
 async def translate_and_save_batch(new_jobs: list[dict]) -> tuple[int, int]:
     """
-    Takes a list of NEW jobs (not in DB yet).
-    Batch-translates their titles 15 at a time.
-    Inserts all into Supabase.
-    Returns (saved_count, failed_count)
+    Takes a list of NEW jobs (not in DB yet, already deduped by both
+    job_key and content_key).
     """
     if not new_jobs:
         return 0, 0
@@ -252,17 +270,23 @@ async def translate_and_save_batch(new_jobs: list[dict]) -> tuple[int, int]:
 
         for job, title_ar in zip(batch, arabic_titles):
             job["title_ar"]           = title_ar
-            job["description_ar"]     = ""          # skip desc translation — saves 70% cost
+            job["description_ar"]     = ""
             job["translation_status"] = "pending"
             try:
                 supabase.table("jobs").insert(job).execute()
                 log.info(f"    ✅ [{job['source_platform']:14}][{job['country']}][{job['job_category']:14}] {job['title_en'][:35]} → {title_ar[:30]}")
                 saved += 1
             except Exception as e:
-                log.error(f"    ❌ DB insert: {e} — {job['title_en'][:40]}")
-                failed += 1
+                # A unique-constraint violation on content_key means a
+                # duplicate slipped through a race condition (two runs
+                # overlapping) — treat that as "skipped", not a real failure.
+                msg = str(e)
+                if "duplicate key" in msg.lower() or "unique constraint" in msg.lower():
+                    log.info(f"    ⏭  Skipped duplicate (race condition): {job['title_en'][:40]}")
+                else:
+                    log.error(f"    ❌ DB insert: {e} — {job['title_en'][:40]}")
+                    failed += 1
 
-        # Small pause between batches to respect rate limits
         if i + batch_size < len(new_jobs):
             await asyncio.sleep(1)
 
@@ -270,35 +294,87 @@ async def translate_and_save_batch(new_jobs: list[dict]) -> tuple[int, int]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  DB HELPERS
+#  DB HELPERS — DEDUP (job_key AND content_key)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def get_existing_keys(keys: list[str]) -> set[str]:
-    """
-    Batch-check which job_keys already exist in DB.
-    One query for the whole list — much faster than 1 query per job.
-    """
+    """Batch-check which job_keys already exist in DB."""
     if not keys:
         return set()
     try:
         result = supabase.table("jobs").select("job_key").in_("job_key", keys).execute()
         return {row["job_key"] for row in result.data}
     except Exception as e:
-        log.error(f"DB key lookup error: {e}")
+        log.error(f"DB job_key lookup error: {e}")
+        return set()
+
+
+def get_existing_content_keys(content_keys: list[str]) -> set[str]:
+    """
+    Batch-check which content_keys already exist in DB — catches
+    reposted jobs (new listing ID, same job) and cross-platform
+    duplicates (same job on Adzuna AND Jooble).
+
+    Requires a 'content_key' TEXT column on the jobs table
+    (see migration note at the bottom of this file).
+    """
+    if not content_keys:
+        return set()
+    try:
+        result = supabase.table("jobs").select("content_key").in_("content_key", content_keys).execute()
+        return {row["content_key"] for row in result.data if row.get("content_key")}
+    except Exception as e:
+        log.error(
+            f"DB content_key lookup error: {e} "
+            f"— has the 'content_key' column been added to the jobs table? "
+            f"See migration note at the bottom of scraper.py."
+        )
         return set()
 
 
 def filter_new_jobs(jobs: list[dict]) -> list[dict]:
-    """Remove jobs already in DB using a single batch query."""
+    """
+    Three-layer dedup:
+      1. Drop jobs whose job_key already exists in DB (exact same
+         platform + listing ID seen before).
+      2. Drop jobs whose content_key already exists in DB (same job,
+         different listing ID or different platform).
+      3. Within THIS batch, drop jobs sharing a content_key with an
+         earlier job in the same run.
+    """
     if not jobs:
         return []
-    keys = [j["job_key"] for j in jobs]
-    existing = get_existing_keys(keys)
-    new = [j for j in jobs if j["job_key"] not in existing]
-    skipped = len(jobs) - len(new)
-    if skipped:
-        log.info(f"  ⏭  {skipped} already in DB, {len(new)} new")
-    return new
+
+    job_keys = [j["job_key"] for j in jobs]
+    existing_job_keys = get_existing_keys(job_keys)
+    stage1 = [j for j in jobs if j["job_key"] not in existing_job_keys]
+    skipped_exact = len(jobs) - len(stage1)
+
+    content_keys = [j["content_key"] for j in stage1]
+    existing_content_keys = get_existing_content_keys(content_keys)
+    stage2 = [j for j in stage1 if j["content_key"] not in existing_content_keys]
+    skipped_content_db = len(stage1) - len(stage2)
+
+    seen_in_batch = set()
+    final = []
+    skipped_content_batch = 0
+    for j in stage2:
+        ck = j["content_key"]
+        if ck in seen_in_batch:
+            skipped_content_batch += 1
+            continue
+        seen_in_batch.add(ck)
+        final.append(j)
+
+    if skipped_exact:
+        log.info(f"  ⏭  {skipped_exact} already in DB (same listing seen before)")
+    if skipped_content_db:
+        log.info(f"  ⏭  {skipped_content_db} skipped — same job already in DB under a different listing/platform")
+    if skipped_content_batch:
+        log.info(f"  ⏭  {skipped_content_batch} skipped — duplicate within this scrape run (same job, multiple sources)")
+    log.info(f"  ✅ {len(final)} genuinely new jobs")
+
+    return final
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -334,7 +410,6 @@ async def fetch_adzuna() -> list[dict]:
                 sal_min = job.get("salary_min")
                 sal_max = job.get("salary_max")
                 salary  = f"{sal_min:.0f}-{sal_max:.0f} AED" if sal_min and sal_max else ""
-                # Use real posting date from Adzuna (field: "created")
                 real_date = job.get("created", "")
                 if not title:
                     continue
@@ -496,7 +571,6 @@ async def main():
     log.info("🚀 MENA Jobs Scraper v5 — starting")
     start = datetime.now()
 
-    # ── Phase 1: APIs ─────────────────────────────────────────────────────────
     log.info("\n── Phase 1: APIs ──")
     adzuna_jobs, jooble_jobs = await asyncio.gather(
         fetch_adzuna(),
@@ -504,7 +578,6 @@ async def main():
         return_exceptions=True
     )
 
-    # ── Phase 2: Browser ──────────────────────────────────────────────────────
     log.info("\n── Phase 2: Browser ──")
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
@@ -524,7 +597,6 @@ async def main():
         )
         await browser.close()
 
-    # ── Flatten ───────────────────────────────────────────────────────────────
     all_jobs: list[dict] = []
     for name, result in [("Adzuna", adzuna_jobs), ("Jooble", jooble_jobs),
                           ("LinkedIn", linkedin_jobs), ("Wuzzuf", wuzzuf_jobs)]:
@@ -536,12 +608,10 @@ async def main():
 
     log.info(f"\n📦 TOTAL collected: {len(all_jobs)}")
 
-    # ── Phase 3: Dedup — one batch DB query ───────────────────────────────────
     log.info("\n── Phase 3: Dedup ──")
     new_jobs = filter_new_jobs(all_jobs)
     log.info(f"🆕 New jobs to save: {len(new_jobs)}")
 
-    # ── Phase 4: Batch translate + save ───────────────────────────────────────
     log.info("\n── Phase 4: Translate & Save ──")
     if new_jobs:
         saved, failed = await translate_and_save_batch(new_jobs)
@@ -560,3 +630,19 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  REQUIRED ONE-TIME DB MIGRATION (run once in Supabase SQL editor)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+#   ALTER TABLE jobs ADD COLUMN IF NOT EXISTS content_key TEXT;
+#   CREATE UNIQUE INDEX IF NOT EXISTS jobs_content_key_unique
+#       ON jobs (content_key)
+#       WHERE content_key IS NOT NULL;
+#   CREATE INDEX IF NOT EXISTS jobs_content_key_idx ON jobs (content_key);
+#
+# The UNIQUE index is a safety net at the database level (in case two
+# scraper runs somehow overlap), on top of the application-level
+# dedup already done in filter_new_jobs(). Existing rows will have
+# content_key = NULL until backfilled — see the backfill script note
+# below for populating it on historical rows.
