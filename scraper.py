@@ -572,11 +572,22 @@ async def main():
     start = datetime.now()
 
     log.info("\n── Phase 1: APIs ──")
-    adzuna_jobs, jooble_jobs = await asyncio.gather(
-        fetch_adzuna(),
-        fetch_jooble(),
-        return_exceptions=True
-    )
+    # ⏸️  PAUSED (see chat notes): Adzuna and Jooble are meta-aggregators —
+    # they re-serve postings already scraped from other job boards, so their
+    # content is structurally duplicate before it even reaches us. Pausing
+    # both to stop feeding new duplicate content into Google while the
+    # existing backlog gets cleaned up. LinkedIn and Wuzzuf are closer to
+    # primary sources and are NOT affected by this change.
+    #
+    # To re-enable later, swap back to:
+    #   adzuna_jobs, jooble_jobs = await asyncio.gather(
+    #       fetch_adzuna(),
+    #       fetch_jooble(),
+    #       return_exceptions=True
+    #   )
+    adzuna_jobs, jooble_jobs = [], []
+    log.info("⏸️  Adzuna paused (see comment in main())")
+    log.info("⏸️  Jooble paused (see comment in main())")
 
     log.info("\n── Phase 2: Browser ──")
     async with async_playwright() as pw:
