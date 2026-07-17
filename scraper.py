@@ -39,7 +39,11 @@ log.info(f"{'✅' if ADZUNA_ENABLED     else '❌'} Adzuna  {'ENABLED' if ADZUNA
 log.info(f"{'✅' if JOOBLE_ENABLED     else '❌'} Jooble  {'ENABLED' if JOOBLE_ENABLED  else 'DISABLED'}")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-MAX_PER_SOURCE = 50
+MAX_PER_SOURCE = 15  # ⬇ reduced from 50 — prioritizing full indexing of
+                      # existing jobs over raw volume. Google needs to
+                      # actually index what we already have before we
+                      # keep adding more. Raise this back up once
+                      # "Discovered - currently not indexed" trends near zero.
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  UTILITIES
@@ -485,17 +489,19 @@ async def scrape_linkedin(ctx) -> list[dict]:
     jobs, page = [], await ctx.new_page()
     targets = [
         ("AE", "https://www.linkedin.com/jobs/search/?location=United%20Arab%20Emirates&f_TPR=r86400&start=0"),
-        ("AE", "https://www.linkedin.com/jobs/search/?location=United%20Arab%20Emirates&f_TPR=r86400&start=25"),
         ("SA", "https://www.linkedin.com/jobs/search/?location=Saudi%20Arabia&f_TPR=r86400&start=0"),
-        ("SA", "https://www.linkedin.com/jobs/search/?location=Saudi%20Arabia&f_TPR=r86400&start=25"),
         ("MA", "https://www.linkedin.com/jobs/search/?location=Morocco&f_TPR=r86400&start=0"),
-        ("MA", "https://www.linkedin.com/jobs/search/?location=Morocco&f_TPR=r86400&start=25"),
         ("EG", "https://www.linkedin.com/jobs/search/?location=Egypt&f_TPR=r86400&start=0"),
-        ("EG", "https://www.linkedin.com/jobs/search/?location=Egypt&f_TPR=r86400&start=25"),
         ("QA", "https://www.linkedin.com/jobs/search/?location=Qatar&f_TPR=r86400&start=0"),
         ("KW", "https://www.linkedin.com/jobs/search/?location=Kuwait&f_TPR=r86400&start=0"),
         ("TN", "https://www.linkedin.com/jobs/search/?location=Tunisia&f_TPR=r86400&start=0"),
         ("DZ", "https://www.linkedin.com/jobs/search/?location=Algeria&f_TPR=r86400&start=0"),
+        # ⬇ paused the "&start=25" second-page targets for AE/SA/MA/EG to
+        # cut raw volume — restore below once indexing backlog is cleared:
+        # ("AE", "https://www.linkedin.com/jobs/search/?location=United%20Arab%20Emirates&f_TPR=r86400&start=25"),
+        # ("SA", "https://www.linkedin.com/jobs/search/?location=Saudi%20Arabia&f_TPR=r86400&start=25"),
+        # ("MA", "https://www.linkedin.com/jobs/search/?location=Morocco&f_TPR=r86400&start=25"),
+        # ("EG", "https://www.linkedin.com/jobs/search/?location=Egypt&f_TPR=r86400&start=25"),
     ]
     try:
         for country, url in targets:
