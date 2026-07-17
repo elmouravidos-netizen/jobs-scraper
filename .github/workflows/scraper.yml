@@ -1,7 +1,9 @@
 name: MENA Jobs Scraper Pipeline
 on:
   schedule:
-    - cron: '0 6,18 * * *'
+    - cron: '0 6 * * *'   # ⬇ reduced from twice/day to once/day — prioritizing
+                          # full indexing of existing jobs over new job volume.
+                          # Previously: '0 6,18 * * *'
   workflow_dispatch:
 jobs:
   scrape:
