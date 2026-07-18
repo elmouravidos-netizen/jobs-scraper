@@ -54,8 +54,10 @@ OPENROUTER_MODEL = "qwen/qwen-2.5-72b-instruct"
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ── Tunables ─────────────────────────────────────────────────────────────────
-BATCH_LIMIT = 150   # jobs processed per run
+BATCH_LIMIT = 200   # jobs processed per run — kept moderate so Gemini's free-tier
+                     # rate limit (15 requests/min) isn't exceeded
 AI_BATCH_SIZE = 8   # jobs per AI call
+SCRAPE_CONCURRENCY = 6   # how many source pages to scrape in parallel
 PLACEHOLDER_MARK = "Full details at"
 RAW_TEXT_CAP = 2500
 
@@ -149,7 +151,7 @@ async def ai_clean_and_translate_batch_gemini(jobs_batch: list[dict]) -> list[st
 
     prompt = (
         "You are a professional Arabic HR content writer. For each numbered job below, "
-        "write a clean, professional Arabic job description of 100-150 words based on the "
+        "write a clean, professional Arabic job description of 120-180 words based on the "
         "raw scraped text. Ignore any navigation menus, ads, or unrelated site content in "
         "the raw text — extract only genuine job information (responsibilities, requirements, "
         "what the role involves). If the raw text has no usable job information, write a "
@@ -197,7 +199,7 @@ async def ai_clean_and_translate_batch_openrouter(jobs_batch: list[dict]) -> lis
 
     prompt = (
         "You are a professional Arabic HR content writer. For each numbered job below, "
-        "write a clean, professional Arabic job description of 100-150 words based on the "
+        "write a clean, professional Arabic job description of 120-180 words based on the "
         "raw scraped text. Ignore any navigation menus, ads, or unrelated site content. "
         "Return ONLY a JSON array of strings, one per job, in the same order.\n\n"
         + "\n\n".join(entries)
@@ -279,11 +281,20 @@ async def main():
             locale="en-US",
             viewport={"width": 1280, "height": 800},
         )
-        page = await ctx.new_page()
-        for j in jobs:
-            log.info(f"🌐 [{j['source_platform']}] {j['title_en'][:50]}")
-            j["raw_text"] = await scrape_description(page, j["source_url"], j["source_platform"])
-            await asyncio.sleep(0.5)
+
+        semaphore = asyncio.Semaphore(SCRAPE_CONCURRENCY)
+
+        async def scrape_one(job: dict, idx: int) -> None:
+            async with semaphore:
+                page = await ctx.new_page()
+                try:
+                    log.info(f"🌐 [{idx+1}/{len(jobs)}] [{job['source_platform']}] {job['title_en'][:50]}")
+                    job["raw_text"] = await scrape_description(page, job["source_url"], job["source_platform"])
+                finally:
+                    await page.close()
+                await asyncio.sleep(0.3)
+
+        await asyncio.gather(*(scrape_one(j, i) for i, j in enumerate(jobs)))
         await browser.close()
 
     scraped_ok = sum(1 for j in jobs if j["raw_text"])
@@ -313,7 +324,7 @@ async def main():
                 failed += 1
 
         if i + AI_BATCH_SIZE < len(jobs):
-            await asyncio.sleep(1)
+            await asyncio.sleep(5)  # keeps us under Gemini's 15 req/min free-tier limit
 
     elapsed = (datetime.now() - start).seconds
     log.info(f"\n{'='*60}")
