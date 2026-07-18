@@ -1,7 +1,10 @@
 name: MENA Description Backfill
 on:
   schedule:
-    - cron: '30 6,18 * * *'   # runs 30 min after your existing scraper, twice a day
+    - cron: '0 */4 * * *'   # every 4 hours (was twice/day) — concurrent
+                             # scraping makes each run much faster now, so
+                             # we can afford to run more often and clear
+                             # the backlog faster. Previously: '30 6,18 * * *'
   workflow_dispatch:
 concurrency:
   group: mena-description-backfill
