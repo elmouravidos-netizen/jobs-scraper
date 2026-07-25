@@ -39,7 +39,7 @@ log.info(f"{'✅' if ADZUNA_ENABLED     else '❌'} Adzuna  {'ENABLED' if ADZUNA
 log.info(f"{'✅' if JOOBLE_ENABLED     else '❌'} Jooble  {'ENABLED' if JOOBLE_ENABLED  else 'DISABLED'}")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-MAX_PER_SOURCE = 15  # ⬇ reduced from 50 — prioritizing full indexing of
+MAX_PER_SOURCE = 10  # ⬇ reduced from 50 — prioritizing full indexing of
                       # existing jobs over raw volume. Google needs to
                       # actually index what we already have before we
                       # keep adding more. Raise this back up once
