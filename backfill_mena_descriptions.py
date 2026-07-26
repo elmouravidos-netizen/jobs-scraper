@@ -11,10 +11,17 @@ description_ar is never filled at all. This script:
   1. Finds jobs still stuck with the placeholder description
   2. Visits the real source_url and pulls the actual posting text
   3. Cleans it (strips nav/footer/ad junk) and asks the AI to turn it into a
-     proper ~100-150 word professional Arabic description
-  4. Updates description_en (real snippet) and description_ar (clean Arabic)
+     proper ~120-180 word professional Arabic description
+  4. Updates description_en (real snippet), description_ar, and title_ar
+     (if it was still missing)
   5. Is fully resumable — safe to run repeatedly, processes a capped batch
      per run so it fits inside a GitHub Actions timeout
+
+AI STRATEGY
+───────────
+- PRIMARY: Google Gemini (FREE, fast, excellent Arabic)
+- FALLBACK: OpenRouter Qwen 2.5 72B (only if Gemini fails/unconfigured)
+- Gemini calls are throttled to stay under the free-tier 15 req/min limit
 
 SAFETY
 ──────
@@ -23,6 +30,9 @@ SAFETY
 - Per-job try/except — one bad page never kills the whole run.
 - BATCH_LIMIT caps how many jobs this run touches, so it's safe to schedule
   on its own timeout and let it catch up gradually across multiple runs.
+- Does NOT write an `updated_at` field — that column does not exist on the
+  `jobs` table and writing it will make every single save fail with
+  "Could not find the 'updated_at' column of 'jobs' in the schema cache".
 """
 
 import os
@@ -31,8 +41,8 @@ import json
 import asyncio
 import logging
 import urllib.request
-from datetime import datetime, timezone
 
+import google.generativeai as genai
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 from supabase import create_client, Client
 
@@ -44,17 +54,27 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Credentials ──────────────────────────────────────────────────────────────
-SUPABASE_URL       = os.environ["SUPABASE_URL"]
-SUPABASE_KEY       = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
+SUPABASE_URL        = os.environ["SUPABASE_URL"]
+SUPABASE_KEY        = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+GEMINI_API_KEY       = os.environ.get("GEMINI_API_KEY", "")
+OPENROUTER_API_KEY  = os.environ.get("OPENROUTER_API_KEY", "")
 
-TRANSLATE_MODEL = "qwen/qwen-2.5-72b-instruct"
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+    log.info("✅ Gemini AI ENABLED (primary)")
+else:
+    gemini_model = None
+    log.warning("⚠️  GEMINI_API_KEY not set — will use OpenRouter only")
+
+OPENROUTER_MODEL = "qwen/qwen-2.5-72b-instruct"
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ── Tunables ─────────────────────────────────────────────────────────────────
-BATCH_LIMIT      = 150   # jobs processed per run — keeps this well inside a 30-45min timeout
-AI_BATCH_SIZE    = 8     # jobs per OpenRouter call — descriptions are longer than titles, keep batches smaller
+BATCH_LIMIT      = 200   # jobs processed per run — kept moderate so Gemini's free-tier
+                          # rate limit (15 requests/min) isn't exceeded
+AI_BATCH_SIZE    = 8     # jobs per AI call
 PLACEHOLDER_MARK = "Full details at"   # how we identify jobs still needing a real description
 RAW_TEXT_CAP     = 2500  # chars of raw scraped page text sent to the AI per job
 
@@ -149,40 +169,26 @@ async def scrape_description(page, url: str, platform: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  AI — turn raw noisy text into a clean, professional Arabic description
+#  AI — Gemini (PRIMARY)
 # ══════════════════════════════════════════════════════════════════════════════
 
-def http_post_json(url: str, payload: dict, headers: dict, timeout: int = 30) -> dict:
-    data = json.dumps(payload).encode("utf-8")
-    h = {"Content-Type": "application/json", "Accept": "application/json", **headers}
-    req = urllib.request.Request(url, data=data, headers=h)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8"))
-
-
-async def ai_clean_and_translate_batch(jobs_batch: list[dict]) -> list[dict]:
-    """
-    Takes jobs with a `raw_text` field (already scraped) and returns a list of
-    {"title_ar": ..., "description_ar": ...} dicts, same order as input.
-    Falls back to {"title_ar": "", "description_ar": ""} per-job on failure —
-    never crashes the batch.
-
-    IMPORTANT: also backfills title_ar when it's missing — the original scraper's
-    title-only translation can fail silently, and previously nothing ever
-    retried it, leaving jobs with a real description but a blank Arabic title.
-    """
+def _build_prompt(jobs_batch: list[dict]) -> str:
     entries = []
     for i, j in enumerate(jobs_batch):
         raw = j["raw_text"] if j["raw_text"] else "(no content available)"
         needs_title = not j.get("title_ar")
-        title_note = " (needs_title_ar: true — this job has NO Arabic title yet, provide one)" if needs_title else " (needs_title_ar: false — Arabic title already exists, still return your best translation)"
+        title_note = (
+            " (needs_title_ar: true — this job has NO Arabic title yet, provide one)"
+            if needs_title else
+            " (needs_title_ar: false — Arabic title already exists, still return your best translation)"
+        )
         entries.append(f"### Job {i+1}{title_note}\nEnglish title: {j['title_en']}\nRaw text: {raw}")
 
-    prompt = (
+    return (
         "You are a professional Arabic HR content writer. For each numbered job below, "
         "provide:\n"
         "1. title_ar: a professional Arabic translation of the English job title\n"
-        "2. description_ar: a clean, professional Arabic job description of 100-150 words "
+        "2. description_ar: a clean, professional Arabic job description of 120-180 words "
         "based on the raw scraped text. Ignore any navigation menus, ads, or unrelated site "
         "content in the raw text — extract only genuine job information (responsibilities, "
         "requirements, what the role involves). If the raw text has no usable job information, "
@@ -193,8 +199,67 @@ async def ai_clean_and_translate_batch(jobs_batch: list[dict]) -> list[dict]:
         + "\n\n".join(entries)
     )
 
+
+def _parse_ai_response(raw_content: str, expected_count: int):
+    raw_content = re.sub(r'^```json\s*|\s*```$', '', raw_content.strip())
+    parsed = json.loads(raw_content)
+    if not (isinstance(parsed, list) and len(parsed) == expected_count):
+        return None
+    results = []
+    for x in parsed:
+        if isinstance(x, dict):
+            results.append({
+                "title_ar": str(x.get("title_ar", "")).strip(),
+                "description_ar": str(x.get("description_ar", "")).strip(),
+            })
+        else:
+            results.append({"title_ar": "", "description_ar": ""})
+    return results
+
+
+async def ai_batch_gemini(jobs_batch: list[dict]):
+    """Use Google Gemini (FREE, primary). Returns None on failure so caller can fall back."""
+    if not gemini_model:
+        return None
+
+    prompt = _build_prompt(jobs_batch)
+    try:
+        response = await asyncio.to_thread(
+            gemini_model.generate_content,
+            prompt,
+            genai.types.GenerationConfig(temperature=0.3, max_output_tokens=2400),
+        )
+        results = _parse_ai_response(response.text, len(jobs_batch))
+        if results:
+            log.info(f"   ✅ Gemini batch successful ({len(results)} jobs)")
+            return results
+        log.warning("   ⚠ Gemini returned wrong shape, will try OpenRouter")
+    except Exception as e:
+        log.warning(f"   ⚠ Gemini failed: {e}, will try OpenRouter")
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  AI — OpenRouter (FALLBACK)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def http_post_json(url: str, payload: dict, headers: dict, timeout: int = 30) -> dict:
+    data = json.dumps(payload).encode("utf-8")
+    h = {"Content-Type": "application/json", "Accept": "application/json", **headers}
+    req = urllib.request.Request(url, data=data, headers=h)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+async def ai_batch_openrouter(jobs_batch: list[dict]) -> list[dict]:
+    """Fallback: only used if Gemini fails or isn't configured."""
+    if not OPENROUTER_API_KEY:
+        log.error("   ❌ No OPENROUTER_API_KEY set and Gemini unavailable — cannot process this batch")
+        return [{"title_ar": "", "description_ar": ""} for _ in jobs_batch]
+
+    prompt = _build_prompt(jobs_batch)
     payload = {
-        "model": TRANSLATE_MODEL,
+        "model": OPENROUTER_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 2400,
         "temperature": 0.3,
@@ -209,19 +274,9 @@ async def ai_clean_and_translate_batch(jobs_batch: list[dict]) -> list[dict]:
         try:
             resp = http_post_json("https://openrouter.ai/api/v1/chat/completions", payload, headers)
             raw_content = resp["choices"][0]["message"]["content"].strip()
-            # Strip markdown code fences if the model added them despite instructions
-            raw_content = re.sub(r'^```json\s*|\s*```$', '', raw_content.strip())
-            parsed = json.loads(raw_content)
-            if isinstance(parsed, list) and len(parsed) == len(jobs_batch):
-                results = []
-                for x in parsed:
-                    if isinstance(x, dict):
-                        results.append({
-                            "title_ar": str(x.get("title_ar", "")).strip(),
-                            "description_ar": str(x.get("description_ar", "")).strip(),
-                        })
-                    else:
-                        results.append({"title_ar": "", "description_ar": ""})
+            results = _parse_ai_response(raw_content, len(jobs_batch))
+            if results:
+                log.info(f"   ✅ OpenRouter batch successful ({len(results)} jobs)")
                 return results
             log.warning(f"   AI batch returned wrong shape (attempt {attempt}), retrying")
         except Exception as e:
@@ -230,6 +285,15 @@ async def ai_clean_and_translate_batch(jobs_batch: list[dict]) -> list[dict]:
 
     log.error("   ❌ AI batch failed all attempts — leaving these jobs for next run")
     return [{"title_ar": "", "description_ar": ""} for _ in jobs_batch]
+
+
+async def ai_clean_and_translate_batch(jobs_batch: list[dict]) -> list[dict]:
+    """Try Gemini first (FREE), fall back to OpenRouter only if Gemini fails."""
+    result = await ai_batch_gemini(jobs_batch)
+    if result:
+        return result
+    log.info("   🔄 Falling back to OpenRouter...")
+    return await ai_batch_openrouter(jobs_batch)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -241,15 +305,14 @@ def save_description(job_key: str, description_en: str, description_ar: str, tit
         update = {
             "description_ar": description_ar,
             "translation_status": "completed",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            # NOTE: deliberately no "updated_at" field here — that column
+            # does not exist on the jobs table and including it makes every
+            # save fail with "Could not find the 'updated_at' column of
+            # 'jobs' in the schema cache". Do not add it back.
         }
-        # Only overwrite description_en if we actually got real scraped text —
-        # never wipe it back to empty on a failed scrape.
         if description_en:
             update["description_en"] = description_en
 
-        # Only write title_ar if it was missing before AND the AI gave us a
-        # real value — never overwrite an existing title, never write blank.
         if not title_ar_existing and title_ar_new:
             update["title_ar"] = title_ar_new
 
@@ -265,8 +328,9 @@ def save_description(job_key: str, description_en: str, description_ar: str, tit
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def main():
-    log.info("🚀 MENA description backfill — starting")
-    start = datetime.now()
+    log.info("🚀 MENA description backfill — starting (Gemini primary, OpenRouter fallback)")
+    loop = asyncio.get_event_loop()
+    start_time = loop.time()
 
     jobs = fetch_jobs_needing_description(BATCH_LIMIT)
     log.info(f"📦 {len(jobs)} jobs need real descriptions this run (capped at {BATCH_LIMIT})")
@@ -305,7 +369,6 @@ async def main():
         for job, result in zip(batch, ai_results):
             desc_ar = result["description_ar"]
             title_ar_new = result["title_ar"]
-            # description_en: use a trimmed version of the raw scraped text if we got one
             desc_en = job["raw_text"][:600] if job["raw_text"] else ""
             if desc_ar:
                 ok = save_description(job["job_key"], desc_en, desc_ar, title_ar_new, job.get("title_ar", ""))
@@ -319,10 +382,11 @@ async def main():
                 log.warning(f"    ⏭  Skipped (no AI result): {job['title_en'][:40]}")
                 failed += 1
 
+        # keeps us safely under Gemini's 15 req/min free-tier limit
         if i + AI_BATCH_SIZE < len(jobs):
-            await asyncio.sleep(1)
+            await asyncio.sleep(5)
 
-    elapsed = (datetime.now() - start).seconds
+    elapsed = int(loop.time() - start_time)
     log.info(f"\n{'='*60}")
     log.info(f"🏁 Done in {elapsed}s")
     log.info(f"   📦 Processed: {len(jobs)}")
